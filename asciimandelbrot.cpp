@@ -14,6 +14,8 @@ using mpfr::mpreal;
 
 double precision = 128;
 
+const int THREAD_COUNT = 16;
+
 // Screen Buffer Size in Character width/height
 unsigned long int buffer_width = 633;
 unsigned long int buffer_height = 125;
@@ -382,8 +384,6 @@ void iterate_buffer_on_x_range(int x_1, int x_2)
         }
     }
 }
-
-const int THREAD_COUNT = 16;
 
 std::vector<std::thread> threads(THREAD_COUNT);
 
