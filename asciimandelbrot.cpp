@@ -9,16 +9,22 @@
 #include <ncurses.h>
 #include <mpreal.h>
 #include <thread>
+#include <atomic>
+#include <chrono>
 
 using mpfr::mpreal;
 
-double precision = 128;
+double precision = 8;
+const int THREAD_COUNT = 85;
 
-const int THREAD_COUNT = 16;
+std::atomic<bool> thread_keep_alive = false;
+std::atomic<bool> pause_thread_flag;
+std::atomic<bool> stop_running_threads_flag;
+std::atomic<bool> kill_threads_flag;
 
 // Screen Buffer Size in Character width/height
-unsigned long int buffer_width = 633;
-unsigned long int buffer_height = 125;
+unsigned long int buffer_width = 0;
+unsigned long int buffer_height = 0;
 
 unsigned long int window_width = 0;
 unsigned long int window_height = 0;
@@ -56,10 +62,10 @@ long int maxIterations;
 float iter_factor = 0;
 
 //Time to sleep for after every frame.
-int sleep_time;
+double sleep_time;
 
 //Frame counter
-int frame_counter = 0;
+long int frame_counter = 0;
 
 //must be less than the same length of the shade_chars array
 int char_count = 0;
@@ -72,8 +78,26 @@ size_t buffer_size;
 //Actual buffer that will contain the graphics.
 char * buffer;
 
+const int screen_chunks = 14;
+
+const int chunk_array_size = screen_chunks * screen_chunks;
+
+bool&& val = false;
+std::atomic<bool> screen_area_completion_index[chunk_array_size] = {val};
+
+void reset_specific_chunks(int x_1, int x_2, int y_1, int y_2);
+
+//Output some useful information about the map and program data.
 void output_status_bar()
 {
+	int a_t = 0;
+	for(int i = 0; i < chunk_array_size; i++)
+	{
+		if(screen_area_completion_index[i] == val)
+		{
+			a_t++;	
+		}
+	}
 	// std::cout << "\nzoom_factor = " << mpf_zoom_factor << "\n";
 	// std::cout << "real coord = " << mpf_real_coordinate << "\nimag coord = " << mpf_imag_coordinate << "\n";
 	// std::cout << "real_min = " << mpf_real_min << " real_max = " << mpf_real_max << "\n";
@@ -82,10 +106,11 @@ void output_status_bar()
 	printw("\nzoom_factor = %s\n", mpf_zoom_factor.toString().c_str());    
 	printw("real coord = %s\nimag coord = %s\n", mpf_real_coordinate.toString().c_str(), mpf_imag_coordinate.toString().c_str());
 	printw("real_min = %s real_max = %s\n", mpf_real_min.toString().c_str(), mpf_real_max.toString().c_str());
-	printw("imag_min = %s imag_max = %s\n", mpf_imag_min.toString().c_str(), mpf_imag_max.toString().c_str());
-	printw("frame counter = %d Iterations: %d", frame_counter, maxIterations);
+	printw("imag_min = %s imag_max = %s A_T = %d\n", mpf_imag_min.toString().c_str(), mpf_imag_max.toString().c_str(), a_t);
+	printw("Iterations: %d frame counter = %d\n", maxIterations, frame_counter);
+	printw("buffer_width: %d buffer_height = %d", buffer_width, buffer_height);
 }
-void sleep(int seconds)
+void sleep(double seconds)
 {
 	usleep(seconds*1000000);
 }
@@ -99,7 +124,6 @@ void sleep_if_set()
 
 //For ease of buffer access
 #define coord(x,y) ((x)+(buffer_width)*(y))
-
 
 //The scale is the relation between the actual span of the plane and the span of the buffer.
 //It is calculated once for each frame.
@@ -142,6 +166,10 @@ mpreal get_width()
 	return mpf_real_max - mpf_real_min;
 }
 
+
+int chunk_width = std::floor(buffer_width / screen_chunks);
+int chunk_height = std::floor(buffer_height / screen_chunks);
+//This is used for panning. The translation distance is set before hand. 
 mpreal mpf_transl_x;
 mpreal mpf_transl_y;
 bool transl_set_for_zlevel;
@@ -149,22 +177,30 @@ void set_translation_distance()
 {
 	if(transl_set_for_zlevel == false)
 	{
-		mpf_transl_x = mpf_width * 0.125;
-		mpf_transl_y = mpf_height * 0.125;
+		mpf_transl_x = chunk_width * mpf_width_scale;
+		mpf_transl_y = chunk_height * mpf_height_scale;
 		transl_set_for_zlevel = true;
 	}
 }
 void move_up()
 {
+	// int vert_chunk = std::floor(buffer_height / screen_chunks);
+	//memset(reinterpret_cast<void*>(buffer), ' ', vert_chunk * buffer_width);
+	// memmove(buffer + vert_chunk * buffer_width, buffer, buffer_size);
 	mpf_imag_min -= mpf_transl_y;
 	mpf_imag_max += mpf_transl_y;
 	mpf_imag_coordinate -= mpf_transl_y;
+	// reset_specific_chunks(1, screen_chunks, 1, 1);
 }
 void move_down()
 {
+	// int vert_chunk = std::floor(buffer_height / screen_chunks);
+	//memset(reinterpret_cast<void*>(buffer), ' ', vert_chunk * buffer_width);
+	// memmove(buffer, buffer + vert_chunk * buffer_width, buffer_size - vert_chunk * buffer_width);
 	mpf_imag_min += mpf_transl_y;
 	mpf_imag_max -= mpf_transl_y;
 	mpf_imag_coordinate += mpf_transl_y;
+	// reset_specific_chunks(1, screen_chunks, screen_chunks, screen_chunks);
 }
 void move_left()
 {
@@ -280,7 +316,7 @@ void set_iterations()
 
 	mvprintw(buffer_height, 0, "Set iterations.");
 	refresh();
-	move(buffer_height+6,30);
+	move(buffer_height+6,12);
 	clrtoeol();
 	getstr(input);
 	try
@@ -291,7 +327,7 @@ void set_iterations()
 	{
 		mvprintw(buffer_height, 0, "Bad number try again.");
 		refresh();
-		sleep(1);
+		sleep(1.0);
 	}
 
 	noecho();
@@ -348,104 +384,289 @@ void iterate_each_buffer_point()
     }
 }
 
-void iterate_buffer_on_x_range_c(int x_1, int x_2, char c)
+std::vector<std::thread> threads(THREAD_COUNT);
+
+struct thread_params
+{
+	int horz_min;
+	int horz_max;
+	int vert_min;
+	int vert_max;
+};
+
+std::vector<thread_params> thr_params;
+
+void thread_loop();
+
+int cap_height(int amt)
+{
+	if(amt > buffer_height)
+	{
+		return buffer_height;
+	}
+	return amt;
+}
+
+int cap_width(int amt)
+{
+	if(amt > buffer_width)
+	{
+		return buffer_width;
+	}
+	return amt;
+}
+
+//Divide the screen buffer into Screen_chunks sizes both vertically and horizontally.
+//Account for the discrepancies that may arise when dividing. Remainder will always go to last chunks.
+std::vector<thread_params> get_screen_chunks()
+{
+	std::vector<thread_params> vec;
+	thread_params tmp_params;
+
+	int horz_span = chunk_width;
+	int vert_span = chunk_height;
+
+	int horz_add = 0;
+	int vert_add = 0;
+
+	bool horz_adj = false;
+	if(buffer_width % horz_span > 0)
+	{
+		horz_adj = true;
+	}
+
+	bool vert_adj = false;
+	if(buffer_height % vert_span > 0)
+	{
+		vert_adj = true;
+	}
+	
+	int horz_remainder = 0;
+	int vert_remainder = 0;
+	int col = 1;
+	int row = 1;
+
+	for (int cur_vert_span = 0; cur_vert_span < buffer_height; cur_vert_span += vert_span)
+    {
+    	row = 1;
+    	for (int cur_horz_span = 0; cur_horz_span < buffer_width; cur_horz_span += horz_span)
+        {
+			horz_add = horz_span;
+			vert_add = vert_span;
+
+        	if(horz_adj && row == screen_chunks)
+        	{
+        		//If you're at the last column or the last row 
+        		horz_span = buffer_width - (cur_horz_span);
+        	}
+        	if(vert_adj && col == screen_chunks)
+        	{
+        		vert_span = buffer_height - (cur_vert_span);
+        	}
+
+			tmp_params = {	cur_horz_span, 
+							cap_width(cur_horz_span + horz_span),
+							cur_vert_span, 
+							cap_height(cur_vert_span + vert_span),
+						};
+
+			vec.push_back(tmp_params);
+			row++;
+        }
+		col++;
+    }
+
+	return vec;
+}
+
+
+//This function was for selective redrawing of screen chunks to avoid recalculating
+//the whole screen when moving the camera. It has a few bugs.
+//Namely the bug is that this mechanism depends on moving the buffer and drawing the
+//only the  newly exposed area, but if you move the camera too fast it moves the unfinished 
+//area across the screen. Leaving trails all over the screen.
+void reset_specific_chunks(int x_1, int x_2, int y_1, int y_2)
 {
 	set_height_scale();
 	set_width_scale();
 
-    for (int y = 0; y < buffer_height; y++)
+	int i = 0;
+    for (int y = 1; y <= screen_chunks; y++)
     {
-        for (int x = x_1; x < x_2; x++)
+    	for (int x = 1; x <= screen_chunks; x++)
         {
-        	buffer[coord(x,y)] = c;
+        	if(x >= x_1 && x <= x_2 && y >= y_1 && y <= y_2)
+			{
+				//Set indexes selected by params to false so threads will redraw selected area
+				screen_area_completion_index[i].store(val);
+			}
+			i++;
         }
     }
 }
 
-//This variable will make the threads display one less character, thus
-//making them more noticeable.
-bool display_threads;
-int d_t;
-void iterate_buffer_on_x_range(int x_1, int x_2)
+//Set all screen chunks to false so whole screen is re-rendered.
+void reset_chunks_index()
 {
-	d_t = 0;
+	pause_thread_flag.store(true);
+	stop_running_threads_flag.store(true);
+	for(int i = 0; i < chunk_array_size; i++)
+	{
+		screen_area_completion_index[i].store(val);
+	}
+	stop_running_threads_flag.store(false);
+	pause_thread_flag.store(false);
+
+	memset(reinterpret_cast<void*>(buffer), ' ', buffer_size);
+}
+
+//Display threads was supposed to leave one unrendered char between every screen chunk;
+//currently not working.
+const bool display_threads = false;
+void calculate_buffer_area_threaded(int x_1, int x_2, int y_1, int y_2)
+{
+	
+	int d_t = 0;
 	if(display_threads)
 	{
+		//If this is subtracted from the loop you can see the boundaries between the thread calculation areas. 
 		d_t = -1;
 	}
 	set_height_scale();
 	set_width_scale();
 
-    for (int y = 0; y < buffer_height; y++)
+    for (int y = y_1; y < y_2-d_t; y++)
     {
-        for (int x = x_1; x < x_2-d_t; x++)
+    	for (int x = x_1; x < x_2-d_t; x++)
         {
+        	if(stop_running_threads_flag | kill_threads_flag){return;}
         	buffer[coord(x,y)] = get_shade( mandelbrot( map_horz_buffer_to_plane(x), map_vert_buffer_to_plane(y)));
         }
     }
 }
 
-std::vector<std::thread> threads(THREAD_COUNT);
-
-struct thread_params
+//This will draw spaces to each screen chunk, put this before a 
+//call to calculate_buffer_area_threaded for visualizing drawing.
+void set_area_to_space(int x_1, int x_2, int y_1, int y_2)
 {
-	int min;
-	int max;
-};
-
-std::vector<thread_params> get_thread_init_vec(int threads)
-{
-	std::vector<thread_params> vec;
-	thread_params tmp_params;
-
-	int span = std::floor(buffer_width / threads);
-	int cur_span = 0;
-
-	for(int i = 0; i < threads; i++)
+	int d_t = 0;
+	if(display_threads)
 	{
-		if(i == threads-1)
-		{	
-			//When you are at the last thread, add the remainder.
-			int remainder = buffer_width - (cur_span + span);
-			tmp_params = {cur_span, cur_span + span + remainder};
-		}
-		else
+		//If this is subtracted from the loop you can see the boundaries between the thread calculation areas. 
+		d_t = -1;
+	}
+	set_height_scale();
+	set_width_scale();
+
+    for (int y = y_1; y < y_2-d_t; y++)
+    {
+    	for (int x = x_1; x < x_2-d_t; x++)
+        {
+        	if(stop_running_threads_flag | kill_threads_flag){return;}
+        	buffer[coord(x,y)] = ' ';
+        }
+    }
+}
+
+//Used to permanently stop all threads.
+void kill_threads()
+{
+	kill_threads_flag.store(true);
+}
+
+//Used to stop threads that are currently drawing the screen.
+void stop_running_threads()
+{
+	stop_running_threads_flag.store(true);
+}
+
+//Re-activates screen drawing.
+void activate_threads()
+{
+	stop_running_threads_flag.store(false);
+}
+
+//This is where threads hang out. Eternally looping in here.
+//They will always check for chunks to draw, unless paused or stopped.
+void thread_loop()
+{
+	do
+	{
+		int chkd = 0;
+		for(int i = 0; i < chunk_array_size; i++)
 		{
-			tmp_params = {cur_span, cur_span + span};
+			if(screen_area_completion_index[i].load() == val)
+			{	
+				screen_area_completion_index[i].store(true);
+				// set_area_to_space(thr_params[i].horz_min, thr_params[i].horz_max, thr_params[i].vert_min, thr_params[i].vert_max);
+				calculate_buffer_area_threaded(thr_params[i].horz_min, thr_params[i].horz_max, thr_params[i].vert_min, thr_params[i].vert_max);
+			}
+			// else
+			// {
+			// 	chkd++;
+			// }
+
+        	if(stop_running_threads_flag | kill_threads_flag)
+			{
+				return;
+			}
+
+			// if(chkd == chunk_array_size - 1)
+			// {
+			// 	pause_thread_flag.store(true);
+			// }
+
+			//If pause_thread_flag is set, threads will loop here to prevent doing work
+			//while resetting screen_area_completion_index.
+			// while(pause_thread_flag == true)
+			// {
+			// 	std::this_thread::yield();
+			// }
+
 		}
-		vec.push_back(tmp_params);
-
-		cur_span += span;
-	}
-	return vec;
+	}while(thread_keep_alive == true);
 }
 
-std::vector<thread_params> thr_params;
-void threaded_iterations()
+//In case you want to join the threads.
+void join_threads()
 {
-	for(int i = 0; i < thr_params.size(); i++)
+	for(int i = 0; i < THREAD_COUNT; i++)
 	{
-		threads[i] = std::thread(iterate_buffer_on_x_range, thr_params[i].min, thr_params[i].max);
-	}
-
-    for (auto& th : threads) {
-    	th.detach();
+		threads[i].join();
 	}
 }
 
-void set_thread_params()
+//Create all the threads and send em to the loop.
+void spawn_threads()
 {
-	thr_params = get_thread_init_vec(THREAD_COUNT);
+	reset_chunks_index();
+
+	for(int i = 0; i < THREAD_COUNT; i++)
+	{
+		threads[i] = std::thread(thread_loop);
+	}
+
+	join_threads();
 }
 
+//For calculating the screen chunks that the threads will each draw.
+void set_screen_chunks()
+{
+	stop_running_threads();
+	thr_params = get_screen_chunks();
+	activate_threads();
+}
 
+//Erases the screen.
 void erase_buffer()
 {
 	// std::cout << std::flush;
     // std::system("clear");
-    clear();
+    //clear();
+    erase();
 }
 
+//Draw the screen.
 void display_buffer()
 {
     for (int y = 0; y < buffer_height; y++)
@@ -458,28 +679,29 @@ void display_buffer()
     }
 }
 
+//Loop for drawing a frame to the screen.
 void display()
 {
-	clear();
+	erase();
 	display_buffer();
 	output_status_bar();
 	refresh();
 }
 
+//Function for initializing the screen size, also used for resizing.
+//Resize errors are either caused by too big of a buffer
+//or because the mapping function breaks. Still working on it.
 void set_screen_size()
 {
 	getmaxyx(stdscr, window_height, window_width);
-
+	
+	//Set buffer dimensions.
 	buffer_height = window_height - 8;
 	buffer_width = window_width - 1;
-
-	//Resize errors are either caused by too big of a buffer
-	//Or because the mapping function breaks when 
 	buffer_size = (buffer_height) * (buffer_width);
 	buffer = new char[buffer_size];
 	memset(reinterpret_cast<void*>(buffer), ' ', buffer_size);
 }
-
 
 
 void on_screen_resize()
@@ -487,13 +709,15 @@ void on_screen_resize()
 	set_screen_size();
 	//Get thread init only needs to be run whenever the screen size changes.
 	//As this is the function that divides the screen buffer into the threads
-	set_thread_params();
-	threaded_iterations();
+	set_screen_chunks();
+	spawn_threads();
+
 }
 
-unsigned long int tmp_x, tmp_y;
+//Check if screen size has changed.
 void check_screen_size()
 {
+	unsigned long int tmp_x, tmp_y;
 	tmp_x = 0;
 	tmp_y = 0;
 
@@ -503,41 +727,41 @@ void check_screen_size()
 
 	if(tmp_x != window_width | tmp_y != window_height)
 	{
-		printw("%d, %d", tmp_x, tmp_y);
-		on_screen_resize();
-		
+		on_screen_resize();	
 	}
 }
 
 int main(int argc, char *argv[])
 {
 	int c;
+
+	//Ncurses init
 	initscr();
 	keypad(stdscr, TRUE);
 	clear();
 	noecho();
 
-	set_screen_size();
-
 	std::ios_base::sync_with_stdio(false);
 	mpreal::set_default_prec(mpfr::digits2bits(precision));
 	std::cout << std::setprecision(precision);
+  	nodelay(stdscr, TRUE);
 
-	input_timeout_ms = 35;
-	
+	//Initialize global variables
+	set_screen_size();
+	pause_thread_flag = true;
+	input_timeout_ms = -1;
 	transl_set_for_zlevel = false;
 	mpf_height_scale = 0;
 	mpf_width_scale = 0;
 	mpf_transl_x = 0;
 	mpf_transl_y = 0;
-
 	iter_factor = 0;
 	char_count = 17;
 	sleep_time = 0;
-	maxIterations = 1000;
+	maxIterations = 25;
 	mpf_real_coordinate = "0";
 	mpf_imag_coordinate = "0";
-	mpf_zoom_factor = "0.8";
+	mpf_zoom_factor = "0.9";
 	mpf_real_min = "-3";
 	mpf_real_max = "3";
 	mpf_imag_min = "-2";
@@ -550,19 +774,15 @@ int main(int argc, char *argv[])
 
 	set_half_zoom_factor();
 	set_zoom_out_factor();
+	set_screen_chunks();
+	spawn_threads();
+
 	set_translation_distance();
 
-	set_thread_params();
-	threaded_iterations();
-
-	display();
-
-	sleep(1);
+	sleep(1.0);
 
 	while(1)
 	{
-		std::cout << "\n";
-
 		display();
 
 		c = getch();
@@ -572,39 +792,38 @@ int main(int argc, char *argv[])
 			case 10:	//10 is enter on normal keyboard
 				zoom();
 				set_translation_distance();
-				threaded_iterations();
+				spawn_threads();
 				break;
 			case KEY_BACKSPACE:
 				zoom_out();
 				set_translation_distance();
-				threaded_iterations();
+				spawn_threads();
 				break;
 			case KEY_UP:
 				move_up();
-				threaded_iterations();
+				spawn_threads();
 				break;
 			case KEY_DOWN:
 				move_down();
-				threaded_iterations();
+				spawn_threads();
 				break;
 			case KEY_LEFT:
 				move_left();
-				threaded_iterations();
+				spawn_threads();
 				break;
 			case KEY_RIGHT:
 				move_right();
-				threaded_iterations();
+				spawn_threads();
 				break;
 			case 88: 	// uppercase X
 			case 120: 	// lowercase X
 				set_coords();
-				threaded_iterations();
-				//move(0,0);
+				spawn_threads();
 				break;
 			case 73:	//uppercase I
 			case 105:	//lowercase i
 				set_iterations();
-				threaded_iterations();
+				spawn_threads();
 				break;
 			case 113: //letter q, for quit
 			case 27:  //escape key
@@ -612,17 +831,15 @@ int main(int argc, char *argv[])
 				return 1;
 				break;
 			default:
-				check_screen_size();
-				// mvprintw(buffer_height, 0,"Charcter pressed is = %3d Hopefully it can be printed as '%c'", c, c);
+			 	check_screen_size();
+				mvprintw(buffer_height, 0,"Character pressed is = %3d Hopefully it can be printed as '%c'", c, c);
 				// refresh();
 				// getch();
 				break;		
 		}
 
 		frame_counter++;
-
-		sleep_if_set();
 	}
 	endwin();
-	// bufferdump.close();
+	return 1;
 }

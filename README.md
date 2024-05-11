@@ -7,7 +7,7 @@ A Multithreaded Mandelbrot Explorer for your terminal. Written in C++ for Ncurse
 | Backspace | Zoom out.        |
 | x         | Set Coordinates. |
 | i         | Set iterations.  |
-|Arrow Keys | Move image.      |
+|Arrow Keys | Move camera.     |
 | q or ESC  | Quit application.|
 
 To compile use:
@@ -19,4 +19,9 @@ Application at max resolution on my system.
 Started this in college and just decided to upload it after I fixed some things. Was kind of inspired by a1k0n's donut.c.
 Still a work in progress. 
 
-Currently refactoring some code and working on making resizing smoother, rendering more efficient and creating more documentation.
+To do: 
+- Thinking of doing some sort of makefile/compilation process.
+- Parametrise many of the variables so user can configure performance behaviors.
+- Want to add horizon mirroring/reflection so only the top half needs to be calculated and the bottom half is mirrored when screen crosses the horizon.
+- Fix seemingly random overflow in calculate_buffer_area_threaded. (Might be related to next point)
+- Function get_screen_chunks needs more proofing, sort out edge cases. 
