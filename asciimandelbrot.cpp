@@ -7,839 +7,1076 @@
 #include <gmp.h>
 #include <gmpxx.h>
 #include <ncurses.h>
-#include <mpreal.h>
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <mutex>
+#include "./mpreal.h"
+#include <queue>
+#include <condition_variable>
 
 using mpfr::mpreal;
 
-double precision = 8;
-const int THREAD_COUNT = 85;
+const uint32_t num_threads = std::thread::hardware_concurrency() * 2 - 2;
+// const uint32_t num_threads = 1;
 
-std::atomic<bool> thread_keep_alive = false;
-std::atomic<bool> pause_thread_flag;
-std::atomic<bool> stop_running_threads_flag;
-std::atomic<bool> kill_threads_flag;
-
-// Screen Buffer Size in Character width/height
-unsigned long int buffer_width = 0;
-unsigned long int buffer_height = 0;
-
-unsigned long int window_width = 0;
-unsigned long int window_height = 0;
-
-int input_timeout_ms;
-
-// #define buffer_width 161
-// #define buffer_height 45
-
-//Shading array
-const char* shade_chars = " .,-~o:;*=><!?#$@";
-
-//Desired Focus
-mpreal mpf_real_coordinate(precision);
-mpreal mpf_imag_coordinate(precision);
-
-//The area calculated for (the continuous plane)
-mpreal mpf_real_min(precision);
-mpreal mpf_real_max(precision);
-
-mpreal mpf_imag_min(precision);
-mpreal mpf_imag_max(precision);
-
-//For calculating the current size of the real plane
-mpreal mpf_width(precision);
-mpreal mpf_height(precision);
-
-//Zoom Factor - The area gets multiplied by this in order to shrink
-mpreal mpf_zoom_factor(precision);
-
-//initial number of iterationss
-long int maxIterations;
-
-//This number will go up after every frame, making the calculation depth deeper as the area calculated gets smaller.
-float iter_factor = 0;
-
-//Time to sleep for after every frame.
-double sleep_time;
-
-//Frame counter
-long int frame_counter = 0;
-
-//must be less than the same length of the shade_chars array
-int char_count = 0;
-
-//Use a file stream not attached to a file in order to get quick output
-std::fstream bufferdump{};
-
-size_t buffer_size;
-
-//Actual buffer that will contain the graphics.
-char * buffer;
-
-const int screen_chunks = 14;
-
-const int chunk_array_size = screen_chunks * screen_chunks;
-
-bool&& val = false;
-std::atomic<bool> screen_area_completion_index[chunk_array_size] = {val};
-
-void reset_specific_chunks(int x_1, int x_2, int y_1, int y_2);
-
-//Output some useful information about the map and program data.
-void output_status_bar()
+class Mandelbrot
 {
-	int a_t = 0;
-	for(int i = 0; i < chunk_array_size; i++)
-	{
-		if(screen_area_completion_index[i] == val)
-		{
-			a_t++;	
-		}
-	}
-	// std::cout << "\nzoom_factor = " << mpf_zoom_factor << "\n";
-	// std::cout << "real coord = " << mpf_real_coordinate << "\nimag coord = " << mpf_imag_coordinate << "\n";
-	// std::cout << "real_min = " << mpf_real_min << " real_max = " << mpf_real_max << "\n";
-	// std::cout << "imag_min = " << mpf_imag_min << " imag_max = " << mpf_imag_max << "\n";
-	// std::cout << "frame counter = " << frame_counter << " Iterations: " << maxIterations << std::endl;
-	printw("\nzoom_factor = %s\n", mpf_zoom_factor.toString().c_str());    
-	printw("real coord = %s\nimag coord = %s\n", mpf_real_coordinate.toString().c_str(), mpf_imag_coordinate.toString().c_str());
-	printw("real_min = %s real_max = %s\n", mpf_real_min.toString().c_str(), mpf_real_max.toString().c_str());
-	printw("imag_min = %s imag_max = %s A_T = %d\n", mpf_imag_min.toString().c_str(), mpf_imag_max.toString().c_str(), a_t);
-	printw("Iterations: %d frame counter = %d\n", maxIterations, frame_counter);
-	printw("buffer_width: %d buffer_height = %d", buffer_width, buffer_height);
-}
-void sleep(double seconds)
-{
-	usleep(seconds*1000000);
-}
-void sleep_if_set()
-{
-	if(sleep_time)
-	{
-		sleep(sleep_time);
-	}
-}
+    public:
+    // Number of iterations
+    long int maxIterations = 50;
 
-//For ease of buffer access
-#define coord(x,y) ((x)+(buffer_width)*(y))
-
-//The scale is the relation between the actual span of the plane and the span of the buffer.
-//It is calculated once for each frame.
-mpreal mpf_width_scale;
-void set_width_scale()
-{
-	mpf_width_scale = mpf_width / buffer_width;
-}
-mpreal mpf_height_scale;
-void set_height_scale()
-{
-	mpf_height_scale = mpf_height / buffer_height;
-}
-
-//Converts to the buffer value into the actual point value.
-//Maps from discrete buffer values to a point on the continuous plane.
-mpreal map_horz_buffer_to_plane(int buffer_x)
-{	
-	return mpf_real_min + buffer_x * mpf_width_scale;
-}
-mpreal map_vert_buffer_to_plane(int buffer_y)
-{
-	return mpf_imag_min + buffer_y * mpf_height_scale;
-}
-
-//The half zoom is used to avoid repetitive divisions when zooming in.
-mpreal mpf_half_zoom(precision);
-void set_half_zoom_factor()
-{
-	mpf_half_zoom = mpf_zoom_factor * 0.5;
-}
-
-//Get the real sizes of the plane.
-mpreal get_height()
-{
-	return mpf_imag_max - mpf_imag_min;
-}
-mpreal get_width()
-{
-	return mpf_real_max - mpf_real_min;
-}
-
-
-int chunk_width = std::floor(buffer_width / screen_chunks);
-int chunk_height = std::floor(buffer_height / screen_chunks);
-//This is used for panning. The translation distance is set before hand. 
-mpreal mpf_transl_x;
-mpreal mpf_transl_y;
-bool transl_set_for_zlevel;
-void set_translation_distance()
-{
-	if(transl_set_for_zlevel == false)
-	{
-		mpf_transl_x = chunk_width * mpf_width_scale;
-		mpf_transl_y = chunk_height * mpf_height_scale;
-		transl_set_for_zlevel = true;
-	}
-}
-void move_up()
-{
-	// int vert_chunk = std::floor(buffer_height / screen_chunks);
-	//memset(reinterpret_cast<void*>(buffer), ' ', vert_chunk * buffer_width);
-	// memmove(buffer + vert_chunk * buffer_width, buffer, buffer_size);
-	mpf_imag_min -= mpf_transl_y;
-	mpf_imag_max += mpf_transl_y;
-	mpf_imag_coordinate -= mpf_transl_y;
-	// reset_specific_chunks(1, screen_chunks, 1, 1);
-}
-void move_down()
-{
-	// int vert_chunk = std::floor(buffer_height / screen_chunks);
-	//memset(reinterpret_cast<void*>(buffer), ' ', vert_chunk * buffer_width);
-	// memmove(buffer, buffer + vert_chunk * buffer_width, buffer_size - vert_chunk * buffer_width);
-	mpf_imag_min += mpf_transl_y;
-	mpf_imag_max -= mpf_transl_y;
-	mpf_imag_coordinate += mpf_transl_y;
-	// reset_specific_chunks(1, screen_chunks, screen_chunks, screen_chunks);
-}
-void move_left()
-{
-	mpf_real_min -= mpf_transl_x;
-	mpf_real_max += mpf_transl_x;
-	mpf_real_coordinate -= mpf_transl_x;
-}
-void move_right()
-{
-	mpf_real_min += mpf_transl_x;
-	mpf_real_max -= mpf_transl_x;
-	mpf_real_coordinate += mpf_transl_x;
-}
-
-mpreal mpf_zoom_out_factor;
-void set_zoom_out_factor()
-{
-	mpf_zoom_out_factor = 1 - mpf_zoom_factor;
-}
-void zoom_out()
-{
-	mpreal half_width, half_height;
-
-	half_width = (mpf_width + mpf_width * mpf_zoom_out_factor) * 0.5;
-	mpf_real_min =  mpf_real_coordinate - half_width;
-	mpf_real_max = mpf_real_coordinate + half_width;
-
-	half_height = (mpf_height + mpf_height * mpf_zoom_out_factor) * 0.5;
-	mpf_imag_min = mpf_imag_coordinate - half_height;
-	mpf_imag_max = mpf_imag_coordinate + half_height;
-
-	mpf_width = half_width + half_width;
-	mpf_height = half_height + half_height;
-	transl_set_for_zlevel = false;
-}
-
-void zoom()
-{
-	//Zooming is done by reducing the area calculated by zoom factor, then adding each 
-	//half of the new area to each side of the coordenate. Thus always zooming around the chosen coordinate.
-	mpreal half_width, half_height;
-
-	//I use half of the factor to immediately get the half width with only one multiplication.
-	//That way i do not have to multiply by the zoom factor then divide by 2. In order to-
-	//add each half to each side of the coordinate.
-	half_width = mpf_width * mpf_half_zoom;
-	mpf_real_min =  mpf_real_coordinate - half_width;
-	mpf_real_max = mpf_real_coordinate + half_width;
-
-	half_height = mpf_height * mpf_half_zoom;
-	mpf_imag_min = mpf_imag_coordinate - half_height;
-	mpf_imag_max = mpf_imag_coordinate + half_height;
-
-	mpf_width = half_width + half_width;
-	mpf_height = half_height + half_height;
-	transl_set_for_zlevel = false;
-}
-
-int mandelbrot(mpreal realc, mpreal imaginaryc)
-{
-	int iter_count = 0;
-
-	mpreal zx(precision), zy(precision);
-	zx = "0";
-	zy = "0";
-
-	mpreal xsqr(precision), ysqr(precision);
-	xsqr = "0";
-	ysqr = "0";
-
-	while(iter_count < maxIterations && xsqr + ysqr < 4.0)
-	{
-	    zy *= zx;
-	    zy += zy + imaginaryc;
-	    zx = xsqr - ysqr + realc;
-	    xsqr = zx * zx;
-	    ysqr = zy * zy;
-		iter_count++;
-	}
-	
-	// std::complex<mpreal> coordenate(realc, imaginaryc);
-	// std::complex<mpreal> z(0,0);
-	// //Calculate values of each point until it reaches max iteration
-	// while(abs(z) < 2 && iter_count < maxIterations)
-	// {
-	// 	z = z * z + coordenate;
-	// 	iter_count++;
-	// }
-
-	return iter_count;
-}
-
-void center_around_set_coords()
-{
-	mpreal half_width, half_height;
-
-	half_width = mpf_width * 0.5;
-	mpf_real_min =  mpf_real_coordinate - half_width;
-	mpf_real_max = mpf_real_coordinate + half_width;
-
-	half_height = mpf_height * 0.5;
-	mpf_imag_min = mpf_imag_coordinate - half_height;
-	mpf_imag_max = mpf_imag_coordinate + half_height;
-
-	transl_set_for_zlevel = false;
-}
-
-void set_iterations()
-{
-	timeout(-1);
-	echo();
-	char* input = new char[160];
-
-	mvprintw(buffer_height, 0, "Set iterations.");
-	refresh();
-	move(buffer_height+6,12);
-	clrtoeol();
-	getstr(input);
-	try
-	{
-		maxIterations = std::stoi(input);
-	}
-	catch(...)
-	{
-		mvprintw(buffer_height, 0, "Bad number try again.");
-		refresh();
-		sleep(1.0);
-	}
-
-	noecho();
-    
-    timeout(input_timeout_ms);
-}
-
-void set_coords()
-{
-    timeout(-1);
-	echo();
-	char* input = new char[160];
-
-	mvprintw(buffer_height, 0, "Set real coordinate.");
-	refresh();
-	move(buffer_height+2,13);
-	clrtoeol();
-	getstr(input);
-	mpf_real_coordinate = input;	
-
-	mvprintw(buffer_height, 0, "Set imaginary coordinate.");
-	refresh();
-	move(buffer_height+3,13);
-	clrtoeol();
-	getstr(input);
-	mpf_imag_coordinate = input;
-
-	noecho();
-	center_around_set_coords();
-    
-    timeout(input_timeout_ms);
-}
-
-char get_shade(int iter)
-{
-	if(iter == maxIterations)
-	{
-		return ' ';
-	}
-	return shade_chars[iter % char_count];
-}
-
-void iterate_each_buffer_point()
-{
-	set_height_scale();
-	set_width_scale();
-
-    for (int y = 0; y < buffer_height; y++)
+    int calculate_point(mpreal realc, mpreal imaginaryc)
     {
-        for (int x = 0; x <= buffer_width; x++)
+        int iter_count = 0;
+
+        mpreal zx, zy;
+        zx = "0";
+        zy = "0";
+
+        mpreal xsqr, ysqr;
+        xsqr = "0";
+        ysqr = "0";
+
+        while(iter_count < maxIterations && xsqr + ysqr < 4.0)
         {
-        	buffer[coord(x,y)] = get_shade( mandelbrot( map_horz_buffer_to_plane(x), map_vert_buffer_to_plane(y)));
+            zy *= zx;
+            zy += zy + imaginaryc;
+            zx = xsqr - ysqr + realc;
+            xsqr = zx * zx;
+            ysqr = zy * zy;
+            iter_count++;
         }
+
+        return iter_count;
     }
-}
 
-std::vector<std::thread> threads(THREAD_COUNT);
-
-struct thread_params
-{
-	int horz_min;
-	int horz_max;
-	int vert_min;
-	int vert_max;
 };
 
-std::vector<thread_params> thr_params;
-
-void thread_loop();
-
-int cap_height(int amt)
+class Mandelbrot_Viewport
 {
-	if(amt > buffer_height)
-	{
-		return buffer_height;
-	}
-	return amt;
-}
+    public:
 
-int cap_width(int amt)
-{
-	if(amt > buffer_width)
-	{
-		return buffer_width;
-	}
-	return amt;
-}
+    // The limits of the calculated plane
+    mpreal mpf_real_min;
+    mpreal mpf_real_max;
 
-//Divide the screen buffer into Screen_chunks sizes both vertically and horizontally.
-//Account for the discrepancies that may arise when dividing. Remainder will always go to last chunks.
-std::vector<thread_params> get_screen_chunks()
-{
-	std::vector<thread_params> vec;
-	thread_params tmp_params;
+    mpreal mpf_imag_min;
+    mpreal mpf_imag_max;
 
-	int horz_span = chunk_width;
-	int vert_span = chunk_height;
+    // Dimensions of plane to be calculated
+    mpreal mpf_width;
+    mpreal mpf_height;
 
-	int horz_add = 0;
-	int vert_add = 0;
 
-	bool horz_adj = false;
-	if(buffer_width % horz_span > 0)
-	{
-		horz_adj = true;
-	}
+    // Desired Focus point
+    mpreal mpf_real_coordinate;
+    mpreal mpf_imag_coordinate;
 
-	bool vert_adj = false;
-	if(buffer_height % vert_span > 0)
-	{
-		vert_adj = true;
-	}
-	
-	int horz_remainder = 0;
-	int vert_remainder = 0;
-	int col = 1;
-	int row = 1;
+    // Zoom Factor - The area gets multiplied by this in order to shrink
+    mpreal mpf_zoom_factor;
+    mpreal mpf_half_zoom;
 
-	for (int cur_vert_span = 0; cur_vert_span < buffer_height; cur_vert_span += vert_span)
+    // The length of traversal in X or Y - controlled by transl_factor
+    mpreal mpf_transl_x;
+    mpreal mpf_transl_y;
+
+    // The factor which when multiplied by each dimension gives 
+    // the distance to move the plane in x or y. 
+    mpreal mpf_transl_factor;
+
+    Mandelbrot_Viewport()
     {
-    	row = 1;
-    	for (int cur_horz_span = 0; cur_horz_span < buffer_width; cur_horz_span += horz_span)
-        {
-			horz_add = horz_span;
-			vert_add = vert_span;
+        // Set center point.
+        mpf_real_coordinate = "0";
+        mpf_imag_coordinate = "0";
 
-        	if(horz_adj && row == screen_chunks)
-        	{
-        		//If you're at the last column or the last row 
-        		horz_span = buffer_width - (cur_horz_span);
-        	}
-        	if(vert_adj && col == screen_chunks)
-        	{
-        		vert_span = buffer_height - (cur_vert_span);
-        	}
+        mpf_zoom_factor = "0.9";
 
-			tmp_params = {	cur_horz_span, 
-							cap_width(cur_horz_span + horz_span),
-							cur_vert_span, 
-							cap_height(cur_vert_span + vert_span),
-						};
+        // Set visible area.
+        mpf_real_min = "-3";
+        mpf_real_max = "3";
+        mpf_imag_min = "-2";
+        mpf_imag_max = "2";
 
-			vec.push_back(tmp_params);
-			row++;
-        }
-		col++;
+        // Set the dimensions of the area.
+        mpf_height = mpf_imag_max - mpf_imag_min;
+	    mpf_width = mpf_real_max - mpf_real_min;
+
+        mpf_transl_factor = 0.1;
+
+        // Set plane movement distances
+        set_translation_distance();
+
+        // Set zoom factors
+        mpf_half_zoom = mpf_zoom_factor * 0.5;
+
     }
 
-	return vec;
-}
-
-
-//This function was for selective redrawing of screen chunks to avoid recalculating
-//the whole screen when moving the camera. It has a few bugs.
-//Namely the bug is that this mechanism depends on moving the buffer and drawing the
-//only the  newly exposed area, but if you move the camera too fast it moves the unfinished 
-//area across the screen. Leaving trails all over the screen.
-void reset_specific_chunks(int x_1, int x_2, int y_1, int y_2)
-{
-	set_height_scale();
-	set_width_scale();
-
-	int i = 0;
-    for (int y = 1; y <= screen_chunks; y++)
+    long getMaxIterations()
     {
-    	for (int x = 1; x <= screen_chunks; x++)
+        return mandelbrot.maxIterations;
+    }
+
+    void setMaxIterations(long iterations)
+    {
+        mandelbrot.maxIterations = iterations;
+    }
+
+    void set_translation_distance()
+    {
+        mpf_transl_x = mpf_width * mpf_transl_factor;
+        mpf_transl_y = mpf_height * mpf_transl_factor;
+    }
+
+    int calculate_point(mpreal realc, mpreal imaginaryc)
+    {
+        int iter = mandelbrot.calculate_point(realc, imaginaryc);
+        // set_translation_distance();
+        return iter;
+    }
+
+    void move_up()
+    {
+        // int vert_chunk = std::floor(buffer_height / screen_chunks);
+        //memset(reinterpret_cast<void*>(buffer), ' ', vert_chunk * buffer_width);
+        // memmove(buffer + vert_chunk * buffer_width, buffer, buffer_size);
+        mpf_imag_min -= mpf_transl_y;
+        mpf_imag_max += mpf_transl_y;
+        mpf_imag_coordinate -= mpf_transl_y;
+        // reset_specific_chunks(1, screen_chunks, 1, 1);
+    }
+
+    void move_down()
+    {
+        // int vert_chunk = std::floor(buffer_height / screen_chunks);
+        //memset(reinterpret_cast<void*>(buffer), ' ', vert_chunk * buffer_width);
+        // memmove(buffer, buffer + vert_chunk * buffer_width, buffer_size - vert_chunk * buffer_width);
+        mpf_imag_min += mpf_transl_y;
+        mpf_imag_max -= mpf_transl_y;
+        mpf_imag_coordinate += mpf_transl_y;
+        // reset_specific_chunks(1, screen_chunks, screen_chunks, screen_chunks);
+    }
+
+    void move_left()
+    {
+        mpf_real_min -= mpf_transl_x;
+        mpf_real_max += mpf_transl_x;
+        mpf_real_coordinate -= mpf_transl_x;
+    }
+
+    void move_right()
+    {
+        mpf_real_min += mpf_transl_x;
+        mpf_real_max -= mpf_transl_x;
+        mpf_real_coordinate += mpf_transl_x;
+    }
+
+    void zoom()
+    {
+        // Zooming is done by reducing the area calculated by zoom factor, then adding each 
+        // half of the new area to each side of the coordenate. Thus always zooming around the chosen coordinate.
+        mpreal half_width, half_height;
+
+        // I use half of the factor to immediately get the half width with only one multiplication.
+        // That way i do not have to multiply by the zoom factor then divide by 2. In order to-
+        // add each half to each side of the coordinate.
+        half_width = mpf_width * mpf_half_zoom;
+        mpf_real_min =  mpf_real_coordinate - half_width;
+        mpf_real_max = mpf_real_coordinate + half_width;
+
+        half_height = mpf_height * mpf_half_zoom;
+        mpf_imag_min = mpf_imag_coordinate - half_height;
+        mpf_imag_max = mpf_imag_coordinate + half_height;
+
+        mpf_width = half_width + half_width;
+        mpf_height = half_height + half_height;
+        
+        set_translation_distance();
+    }
+
+    void zoom_out()
+    {
+        mpreal half_width, half_height;
+
+        half_width = (mpf_width + mpf_width * (1 - mpf_zoom_factor)) * 0.5;
+        mpf_real_min =  mpf_real_coordinate - half_width;
+        mpf_real_max = mpf_real_coordinate + half_width;
+
+        half_height = (mpf_height + mpf_height * (1 - mpf_zoom_factor)) * 0.5;
+        mpf_imag_min = mpf_imag_coordinate - half_height;
+        mpf_imag_max = mpf_imag_coordinate + half_height;
+
+        mpf_width = half_width + half_width;
+        mpf_height = half_height + half_height;
+        
+        set_translation_distance();
+    }
+
+    void center_around_set_coords()
+    {
+        mpreal half_width, half_height;
+
+        half_width = mpf_width * 0.5;
+        mpf_real_min =  mpf_real_coordinate - half_width;
+        mpf_real_max = mpf_real_coordinate + half_width;
+
+        half_height = mpf_height * 0.5;
+        mpf_imag_min = mpf_imag_coordinate - half_height;
+        mpf_imag_max = mpf_imag_coordinate + half_height;
+
+        // set_translation_distance();
+    }
+
+    void set_coords(mpreal real, mpreal imag)
+    {
+        mpf_real_coordinate = real;	
+        mpf_imag_coordinate = imag;
+        center_around_set_coords();
+    }
+
+    // Output some useful information about the map and program data.
+    void output_status_bar()
+    {
+        // printw("depth = %s\n", (mpf_real_max - mpf_real_min).toString().c_str() );
+        // printw("real coord = %s\nimag coord = %s\n", mpf_real_coordinate.toString().c_str(), mpf_imag_coordinate.toString().c_str());
+        // printw("real_min = %s \nreal_max = %s\n", mpf_real_min.toString().c_str(), mpf_real_max.toString().c_str());
+        // printw("imag_min = %s \nimag_max = %s \n", mpf_imag_min.toString().c_str(), mpf_imag_max.toString().c_str());
+        // printw("Iterations: %ld\n", getMaxIterations());
+        // printw("buffer_width: %d buffer_height = %d", buffer_width, buffer_height);
+    }
+    
+    // Output some useful information about the viewport.
+    std::string get_status()
+    {
+        std::string s;
+        s += "depth = " + (mpf_real_max - mpf_real_min).toString();
+        s += "\n\rreal coord = " + mpf_real_coordinate.toString();
+        s += "\n\rimag coord = " + mpf_imag_coordinate.toString();
+        s += "\n\rreal_min = " +  mpf_real_min.toString();
+        s += "\n\rreal_max = " + mpf_real_max.toString();
+        s += "\n\rimag_min = " + mpf_imag_min.toString();
+        s += "\n\rimag_max = " + mpf_imag_max.toString();
+        s += "\n\rIterations = " + std::to_string(getMaxIterations());
+        return s;
+    }
+    
+    private:
+
+    Mandelbrot mandelbrot;
+};
+
+class Display
+{
+    public:
+
+    std::mutex sizes_mutex;
+
+    std::vector<char> buffer;
+
+    long int buffer_width;
+    long int buffer_height;
+
+    long int buffer_size;
+
+    bool frame_ready = true;
+
+    std::string stats = "";
+
+    int coord(int x, int y)
+    {
+        return x+(buffer_width*y);
+    }
+
+    // Draw the frame on the terminal.
+    // void draw_nobuff()
+    // {
+    //     move(0,0);
+    //     for (int pos = 0; pos < buffer_size-1; pos += buffer_width)
+    //     {
+    //         write(1, buffer.data() + pos, buffer_width);
+    //         write(1, "\n", sizeof(char));
+    //         write(1, "\r", sizeof(char));
+    //     }
+    // }
+
+    void draw()
+    {
+        std::unique_lock lock(sizes_mutex);
+        printf("\033[%d;%dH", 1, 1);
+        for (int h = 0; h < buffer_height; h++)
         {
-        	if(x >= x_1 && x <= x_2 && y >= y_1 && y <= y_2)
-			{
-				//Set indexes selected by params to false so threads will redraw selected area
-				screen_area_completion_index[i].store(val);
-			}
-			i++;
+            for(int w = 0; w < buffer_width; w++)
+            {
+                printf("%c",buffer[(h*buffer_width)+w]);
+            }
+            printf("%c",'\r');
+            printf("%c",'\n');
+        }
+        // printf("\x1B[1A");
+    }
+
+    void print_stats()
+    {
+        printf("\033[%ld;%dH", buffer_height+1, 1);
+        // printf("\x1B[0J");
+        printf("%s",stats.c_str());
+        printf("\033[%d;%dH", 1, 1);
+    }
+
+    void clear_stats()
+    {
+        printf("\033[%ld;%dH", buffer_height+1, 1);
+        printf("\x1B[0J");
+    }
+
+    Display()
+    {
+        // Ncurses init
+        initscr();			/* Start curses mode 		*/
+        raw();				/* Line buffering disabled	*/
+        keypad(stdscr, TRUE);		/* We get F1, F2 etc..		*/
+        noecho();			/* Don't echo() while we do getch */
+
+        adjust_screen_size();
+
+        std::fill(buffer.begin(), buffer.end(), '|');
+    }
+
+    void display_img()
+    {
+        print_stats();
+        draw();
+    }
+
+    void display_threaded()
+    {
+        while(true)
+        {
+            if(frame_ready == true)
+            {
+                clear();
+                draw();
+                print_stats();
+            }
         }
     }
-}
 
-//Set all screen chunks to false so whole screen is re-rendered.
-void reset_chunks_index()
-{
-	pause_thread_flag.store(true);
-	stop_running_threads_flag.store(true);
-	for(int i = 0; i < chunk_array_size; i++)
-	{
-		screen_area_completion_index[i].store(val);
-	}
-	stop_running_threads_flag.store(false);
-	pause_thread_flag.store(false);
+    // void generate_draw_thread()
+    // {
+    //     std::thread T1(&Display::display_threaded, this);
+    //     T1.detach();
+    // }
 
-	memset(reinterpret_cast<void*>(buffer), ' ', buffer_size);
-}
-
-//Display threads was supposed to leave one unrendered char between every screen chunk;
-//currently not working.
-const bool display_threads = false;
-void calculate_buffer_area_threaded(int x_1, int x_2, int y_1, int y_2)
-{
-	
-	int d_t = 0;
-	if(display_threads)
-	{
-		//If this is subtracted from the loop you can see the boundaries between the thread calculation areas. 
-		d_t = -1;
-	}
-	set_height_scale();
-	set_width_scale();
-
-    for (int y = y_1; y < y_2-d_t; y++)
+    void set_stats(std::string s)
     {
-    	for (int x = x_1; x < x_2-d_t; x++)
+        stats = s;
+    }
+
+    void adjust_screen_size()
+    {
+        std::unique_lock lock(sizes_mutex);
+        long int window_width = 0;
+        long int window_height = 0;
+        getmaxyx(stdscr, window_height, window_width);
+
+        if((buffer_width != window_width) | (buffer_height != window_height))
         {
-        	if(stop_running_threads_flag | kill_threads_flag){return;}
-        	buffer[coord(x,y)] = get_shade( mandelbrot( map_horz_buffer_to_plane(x), map_vert_buffer_to_plane(y)));
+            //Set buffer dimensions.
+            buffer_height = window_height - 9;
+            buffer_width = window_width - 1;
+            buffer_size = buffer_height * buffer_width;
+            buffer.resize(buffer_size);
+            std::fill(buffer.begin(), buffer.end(), '|');
         }
     }
-}
+};
 
-//This will draw spaces to each screen chunk, put this before a 
-//call to calculate_buffer_area_threaded for visualizing drawing.
-void set_area_to_space(int x_1, int x_2, int y_1, int y_2)
+class Renderer
 {
-	int d_t = 0;
-	if(display_threads)
-	{
-		//If this is subtracted from the loop you can see the boundaries between the thread calculation areas. 
-		d_t = -1;
-	}
-	set_height_scale();
-	set_width_scale();
+    public:
+    // Shading array
+    const char* shade_chars = " .,-~o:;*=><!?HX#$@🮙";
+    // const char* shade_chars = " ░▒▓█";
+    
+    bool shade_toggle = false;
+    unsigned long int shade_char_size = 0;
 
-    for (int y = y_1; y < y_2-d_t; y++)
+
+    // Work load for the threads in <start_line, end_line> tuple.
+    std::queue<std::tuple<int, int>> work_loads;
+    
+    mpreal mpf_width_scale;
+    mpreal mpf_height_scale;
+
+    // Screen Buffer Size in Character width/height
+    static long int buffer_width;
+    static long int buffer_height;
+    long int buffer_size = 0;
+
+    long int window_width = 0;
+    long int window_height = 0;
+
+    bool ghosting = false;
+
+    Mandelbrot_Viewport& mandelbrot_viewport_ptr;
+    Display& display_ptr;
+
+    Renderer(Mandelbrot_Viewport& _m_v_ptr, Display& _display_ptr) : mandelbrot_viewport_ptr(_m_v_ptr), display_ptr(_display_ptr) 
     {
-    	for (int x = x_1; x < x_2-d_t; x++)
+        calc_scale();
+    }
+
+    // Get character from shader array.
+    char get_shade(int iter)
+    {
+        if(iter == mandelbrot_viewport_ptr.getMaxIterations())
         {
-        	if(stop_running_threads_flag | kill_threads_flag){return;}
-        	buffer[coord(x,y)] = ' ';
+            return ' ';
+        }
+        return shade_chars[(iter % sizeof(shade_chars))+shade_char_size];
+    }
+
+    // Calculate the points in the mandelbrot_viewport_ptr. 
+    void calculate_whole_frame()
+    {
+        for (int y = 0; y < display_ptr.buffer_height; y++)
+        {
+            for (int x = 0; x <= display_ptr.buffer_width; x++)
+            {
+                display_ptr.buffer[display_ptr.coord(x,y)] = get_shade( mandelbrot_viewport_ptr.calculate_point( map_horz_buffer_to_plane(x), map_vert_buffer_to_plane(y)));
+            }
         }
     }
-}
 
-//Used to permanently stop all threads.
-void kill_threads()
-{
-	kill_threads_flag.store(true);
-}
-
-//Used to stop threads that are currently drawing the screen.
-void stop_running_threads()
-{
-	stop_running_threads_flag.store(true);
-}
-
-//Re-activates screen drawing.
-void activate_threads()
-{
-	stop_running_threads_flag.store(false);
-}
-
-//This is where threads hang out. Eternally looping in here.
-//They will always check for chunks to draw, unless paused or stopped.
-void thread_loop()
-{
-	do
-	{
-		int chkd = 0;
-		for(int i = 0; i < chunk_array_size; i++)
-		{
-			if(screen_area_completion_index[i].load() == val)
-			{	
-				screen_area_completion_index[i].store(true);
-				// set_area_to_space(thr_params[i].horz_min, thr_params[i].horz_max, thr_params[i].vert_min, thr_params[i].vert_max);
-				calculate_buffer_area_threaded(thr_params[i].horz_min, thr_params[i].horz_max, thr_params[i].vert_min, thr_params[i].vert_max);
-			}
-			// else
-			// {
-			// 	chkd++;
-			// }
-
-        	if(stop_running_threads_flag | kill_threads_flag)
-			{
-				return;
-			}
-
-			// if(chkd == chunk_array_size - 1)
-			// {
-			// 	pause_thread_flag.store(true);
-			// }
-
-			//If pause_thread_flag is set, threads will loop here to prevent doing work
-			//while resetting screen_area_completion_index.
-			// while(pause_thread_flag == true)
-			// {
-			// 	std::this_thread::yield();
-			// }
-
-		}
-	}while(thread_keep_alive == true);
-}
-
-//In case you want to join the threads.
-void join_threads()
-{
-	for(int i = 0; i < THREAD_COUNT; i++)
-	{
-		threads[i].join();
-	}
-}
-
-//Create all the threads and send em to the loop.
-void spawn_threads()
-{
-	reset_chunks_index();
-
-	for(int i = 0; i < THREAD_COUNT; i++)
-	{
-		threads[i] = std::thread(thread_loop);
-	}
-
-	join_threads();
-}
-
-//For calculating the screen chunks that the threads will each draw.
-void set_screen_chunks()
-{
-	stop_running_threads();
-	thr_params = get_screen_chunks();
-	activate_threads();
-}
-
-//Erases the screen.
-void erase_buffer()
-{
-	// std::cout << std::flush;
-    // std::system("clear");
-    //clear();
-    erase();
-}
-
-//Draw the screen.
-void display_buffer()
-{
-    for (int y = 0; y < buffer_height; y++)
+    void calculate_from_buff_pos(int buff_pos)
     {
-        for (int x = 0; x < buffer_width; x++)
-        {
-        	addch(buffer[coord(x,y)]);
-        }
-        addch('\n');
+        int x = buff_pos % display_ptr.buffer_width;
+        int y = buff_pos / display_ptr.buffer_width;
+        display_ptr.buffer[buff_pos] = get_shade( mandelbrot_viewport_ptr.calculate_point( map_horz_buffer_to_plane(x), map_vert_buffer_to_plane(y)));
     }
-}
 
-//Loop for drawing a frame to the screen.
-void display()
+    // Converts the buffer value into a point value on the mandelbrot plane.
+    mpreal map_horz_buffer_to_plane(int buffer_x)
+    {	
+        return mandelbrot_viewport_ptr.mpf_real_min + buffer_x * mpf_width_scale;
+    }
+    
+    // Converts the buffer value into a point value on the mandelbrot plane.
+    mpreal map_vert_buffer_to_plane(int buffer_y)
+    {
+        return mandelbrot_viewport_ptr.mpf_imag_min + buffer_y * mpf_height_scale;
+    }
+
+    // shrink the scale when zooming in.
+    void shrink_scale()
+    {
+        mpf_width_scale *= mandelbrot_viewport_ptr.mpf_zoom_factor;
+        mpf_height_scale *= mandelbrot_viewport_ptr.mpf_zoom_factor;
+    }
+
+    void expand_scale()
+    {
+        mpf_width_scale /= mandelbrot_viewport_ptr.mpf_zoom_factor;
+        mpf_height_scale /= mandelbrot_viewport_ptr.mpf_zoom_factor;
+    }
+
+    // Adjusts the buffer pixel to point conversion for the current window to plane size.
+    void calc_scale()
+    {
+        mpf_width_scale = mandelbrot_viewport_ptr.mpf_width / display_ptr.buffer_width;
+        mpf_height_scale = mandelbrot_viewport_ptr.mpf_height / display_ptr.buffer_height;
+        generate_thread_work();
+    }
+
+    void generate_thread_work()
+    {
+        display_ptr.frame_ready = false;
+
+        work_loads = std::queue<std::tuple<int, int>>();
+        // printw("width, height: %ld, %ld\n", display_ptr.buffer_width, display_ptr.buffer_height);
+        // If there are more threads than lines make each thread process one line.
+        if( num_threads >= display_ptr.buffer_size )
+        {
+            for(int i = 0; i < display_ptr.buffer_size; i++)
+            {
+                work_loads.emplace(std::make_tuple(i,1));
+            }
+            return;
+        }
+
+        // Calculate amount of lines per each thread.
+        int floored = floor(display_ptr.buffer_size / num_threads);
+        long int end = 0;
+
+        // Make the work loads, which consist of a tuple of beggining and ending indexes to calculate.
+        for(int i = 0; i < display_ptr.buffer_size; i += floored)
+        {
+            end = i + floored;
+            work_loads.emplace(std::make_tuple(i,  end));
+            // printw("Workload %d, %ld\n", i, end);
+        }
+
+        // Check if there is a remainder due to rounding and add it to the last work load.
+        int remainder = display_ptr.buffer_size % floored;  
+
+        if(remainder == 0)
+        {
+            return;
+        }
+
+        // Add remainder to last work load
+        int first_offset = std::get<0>(work_loads.back());
+        int last_offset = display_ptr.buffer_size;
+
+        // printw("Workload %d, %d\n", first_offset, last_offset);
+        work_loads.back() = std::make_tuple(first_offset, last_offset);
+        // refresh();
+    }
+};
+
+class ThreadPool
 {
-	erase();
-	display_buffer();
-	output_status_bar();
-	refresh();
-}
+    private:
 
-//Function for initializing the screen size, also used for resizing.
-//Resize errors are either caused by too big of a buffer
-//or because the mapping function breaks. Still working on it.
-void set_screen_size()
+    bool terminate = false;
+    bool frame_ready = false;
+    bool pause_draw_thread = false;
+    bool terminate_draw = false;
+
+    std::mutex queue_mutex;
+    std::condition_variable queue_condition;
+    std::condition_variable job_condition;
+
+    std::mutex draw_mutex;
+    std::condition_variable pause_draw_condition;
+    std::condition_variable frame_wait_condition;
+    
+    std::vector<std::thread> thread_vector;
+
+    std::queue<std::tuple<int, int>> jobs = {};
+    std::queue<std::tuple<int, int>> const_jobs = {};
+
+    std::chrono::time_point<std::chrono::system_clock> shade_start_time = std::chrono::system_clock::now();
+    std::chrono::time_point<std::chrono::system_clock> frame_start_time = std::chrono::system_clock::now();
+    std::thread DT;
+
+    u_int32_t done_threads = num_threads;
+
+    Renderer& renderer_ptr;
+
+    void ThreadLoop()
+    {
+        while (true)
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+
+            // If mutex is occupied, wait until its not.
+            queue_condition.wait(lock,[this] 
+            {
+                return (jobs.empty() == false) | terminate;
+            });
+
+            if (terminate) 
+            {
+                queue_condition.notify_one();
+                lock.unlock();
+                return;
+            }
+
+            // Take and delete job from the queue
+            std::tuple<int, int> job = jobs.front();
+            jobs.pop();
+
+            // Allow other thread to engage.
+            lock.unlock();
+
+            // Do the work.
+            process_pixels(std::get<0>(job), std::get<1>(job));
+        }
+    }
+
+    bool check_shade_time()
+    {
+        const std::chrono::time_point<std::chrono::system_clock> now = std::chrono::system_clock::now();
+        const std::chrono::duration duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - shade_start_time);
+        if(duration.count() > 200)
+        {
+            shade_start_time = now;
+            render_frame();
+            return true;
+        }
+        return false;
+    }
+
+    bool check_frame_time()
+    {
+        const std::chrono::time_point<std::chrono::system_clock> now = std::chrono::system_clock::now();
+        const std::chrono::duration duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - frame_start_time);
+        if(duration.count() > 100)
+        {
+            frame_start_time = now;
+            return true;
+        }
+        return false;
+    }
+
+    void cycle_shade()
+    {
+        if(check_shade_time())
+        {
+            if(renderer_ptr.shade_char_size > sizeof(renderer_ptr.shade_chars))
+            {
+                renderer_ptr.shade_char_size = 0;
+            }
+            else
+            {
+
+                renderer_ptr.shade_char_size++;
+            }
+        }
+    }
+
+    void draw_loop()
+    {
+        while(true)
+        {
+            std::unique_lock lock(draw_mutex);
+            pause_draw_condition.wait(lock, [this]{
+                return (pause_draw_thread == false) | terminate_draw ;
+            });
+
+            if (terminate_draw) 
+            {
+                return;
+            }
+
+            if(renderer_ptr.shade_toggle)
+            {
+                cycle_shade();
+            }
+            
+            if(check_frame_time())
+            {
+                if(frame_ready)
+                {
+                    renderer_ptr.display_ptr.display_img();
+                    frame_wait_condition.notify_all();
+                    frame_ready = false;
+                }
+                else
+                {
+                    renderer_ptr.display_ptr.clear_stats();
+                    renderer_ptr.display_ptr.print_stats();
+                }
+            }
+        }
+    }
+
+    void signal_done()
+    {
+        done_threads++;
+        if(done_threads == (num_threads-1))
+        {
+            frame_ready = true;
+            frame_wait_condition.notify_all();
+        }
+    }
+
+    void process_pixels(int beg, int end)
+    {
+        for( int i = beg; i < end; i++)
+        {
+            if(terminate)
+            {
+                return;
+            }
+            renderer_ptr.calculate_from_buff_pos(i);
+        }
+        signal_done();
+    }
+
+    public:
+
+    void raise_pause_draw_flag()
+    {
+        pause_draw_thread = true;
+    }
+
+    void unpause_draw_thread()
+    {
+        pause_draw_thread = false;
+        pause_draw_condition.notify_all();
+    }
+
+    int get_num_done_threads()
+    {
+        return done_threads;
+    }
+
+    void spawn_threads(uint32_t num_threads)
+    {
+        terminate_draw = false;
+        terminate = false;
+        for (uint32_t i = 0; i < num_threads - 1; i++)
+        {
+            thread_vector.emplace_back(std::thread(&ThreadPool::ThreadLoop,this));
+        }
+        DT = std::thread(&ThreadPool::draw_loop, this);
+    }
+
+    void init_draw_thread()
+    {
+        DT.join();
+        terminate_draw = false;
+        erase();
+        DT = std::thread(&ThreadPool::draw_loop, this);
+    }
+
+    void kill_draw_thread()
+    {
+        std::unique_lock lock(draw_mutex);
+        addstr("killing draw thread now");
+        terminate_draw = true;
+    }
+    
+    void add_queue(std::queue<std::tuple<int, int>> _work_load)
+    {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        
+        frame_ready = false;
+        done_threads = 0;
+
+        jobs = _work_load;
+        const_jobs = _work_load;
+
+        // When threads are waiting this notifies that the workload is ready.
+        queue_condition.notify_all();
+        pause_draw_condition.notify_all();
+    }
+
+    void render_frame()
+    {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+
+        frame_ready = false;
+        done_threads = 0;
+
+        // Reset job queue to the previous
+        jobs = const_jobs;
+        
+        // When threads are waiting this notifies that the workload is ready.
+        queue_condition.notify_all();
+    }
+
+    void wait_for_frame()
+    {
+        std::unique_lock<std::mutex> lock(draw_mutex);
+
+        // If mutex is occupied, the thread is still being generated.
+        frame_wait_condition.wait(lock);
+    }
+
+    void render_and_wait()
+    {
+        render_frame();
+        wait_for_frame();
+    }
+
+    int get_job_num()
+    {
+        return jobs.size();
+    }
+
+    void clear_jobs()
+    {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        jobs = {};
+        queue_condition.notify_one();
+    }
+
+    void Stop()
+    {
+        terminate = true;
+        terminate_draw = true;
+
+        for (std::thread& active_thread : thread_vector) 
+        {
+            queue_condition.notify_all();
+            active_thread.join();
+        }
+        thread_vector.clear();
+
+        pause_draw_condition.notify_all();
+        DT.join();
+    }
+    
+    bool busy()
+    {
+        bool poolbusy;
+
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        poolbusy = !jobs.empty();
+        
+        return poolbusy;
+    }
+
+    ThreadPool(uint32_t num_threads, Renderer& _renderer_ptr) : renderer_ptr(_renderer_ptr)
+    {
+        addstr("INIT");
+        add_queue(renderer_ptr.work_loads);
+        spawn_threads(num_threads);
+        render_and_wait();
+    }  
+};
+
+class UserInterface
 {
-	getmaxyx(stdscr, window_height, window_width);
-	
-	//Set buffer dimensions.
-	buffer_height = window_height - 8;
-	buffer_width = window_width - 1;
-	buffer_size = (buffer_height) * (buffer_width);
-	buffer = new char[buffer_size];
-	memset(reinterpret_cast<void*>(buffer), ' ', buffer_size);
-}
+    public:
 
+    std::string status = "\n\r";
 
-void on_screen_resize()
-{
-	set_screen_size();
-	//Get thread init only needs to be run whenever the screen size changes.
-	//As this is the function that divides the screen buffer into the threads
-	set_screen_chunks();
-	spawn_threads();
+    Mandelbrot_Viewport mandelbrot_viewport;
 
-}
+    Display display;
 
-//Check if screen size has changed.
-void check_screen_size()
-{
-	unsigned long int tmp_x, tmp_y;
-	tmp_x = 0;
-	tmp_y = 0;
+    // Pass a pointer to the TerminalRenderer class 
+    // so it can use it.
+    Renderer renderer{mandelbrot_viewport, display};
 
-	printw("set");
+    ThreadPool pool{num_threads, renderer};
 
-	getmaxyx(stdscr, tmp_y, tmp_x);
+    int c;
 
-	if(tmp_x != window_width | tmp_y != window_height)
-	{
-		on_screen_resize();	
-	}
-}
+    void Navigate()
+    {
+
+        keypad(stdscr, TRUE);
+        clear();
+        noecho();
+        std::ios_base::sync_with_stdio(false);
+        // nodelay(stdscr, TRUE);
+        
+        while(true)
+        {
+            clear_status();
+            c = getch();
+
+            switch(c)
+            {			
+                case 10:	//10 is enter on normal keyboard
+                    set_status("Zooming in...");
+                    mandelbrot_viewport.zoom();
+                    renderer.shrink_scale();
+                    pool.render_and_wait();
+                    break;
+                case KEY_BACKSPACE:
+                    set_status("Zooming out...");
+                    mandelbrot_viewport.zoom_out();
+                    renderer.expand_scale();
+                    pool.render_and_wait();
+                    break;
+                case KEY_UP:
+                    set_status("Moving up...");
+                    mandelbrot_viewport.move_up();
+                    pool.render_and_wait();
+                    break;
+                case KEY_DOWN:
+                    set_status("Moving down...");
+                    mandelbrot_viewport.move_down();
+                    pool.render_and_wait();
+                    break;
+                case KEY_LEFT:
+                    set_status("Moving left...");
+                    mandelbrot_viewport.move_left();
+                    pool.render_and_wait();
+                    break;
+                case KEY_RIGHT:
+                    set_status("Moving right...");
+                    mandelbrot_viewport.move_right();
+                    pool.render_and_wait();
+                    break;
+                case KEY_RESIZE:
+                    resize_window();
+                    pool.render_and_wait();
+                    break;
+                case 67: // uppercase C
+                case 99: // lowercase c
+                    set_status("Toggle Shade Cycling");
+                    toggle_shade_cycle();
+                    break;
+                case 88: 	// uppercase X
+                case 120: 	// lowercase X
+                    set_coords();
+                    pool.render_and_wait();
+                    break;
+                case 73:	//uppercase I
+                case 105:	//lowercase i
+                    set_iterations();
+                    pool.render_and_wait();
+                    break;
+                case 113: //letter q, for quit
+                case 27:  //escape key
+                    pool.Stop();
+                    endwin();
+                    return;
+                    break;
+            }
+        }
+    }
+
+    void toggle_shade_cycle()
+    {
+        if(renderer.shade_toggle)
+        {
+            renderer.shade_toggle = false;
+        }
+        else
+        {
+            renderer.shade_toggle = true;
+        }
+    }
+
+    void update_status()
+    {
+        display.set_stats(status + mandelbrot_viewport.get_status());
+    }
+
+    void set_status(std::string s)
+    {
+        status = s + "\n\r";
+        update_status();
+    }
+
+    void draw()
+    {
+        pool.wait_for_frame();
+        display.display_img();
+    }
+
+    void clear_status()
+    {
+        set_status("");
+        update_status();
+    }
+
+    void resize_window()
+    {
+        pool.Stop();
+
+        // Resize screen
+        display.adjust_screen_size();
+        renderer.calc_scale();
+
+        // Add recalculated workload to the thread pool.
+        pool.add_queue(renderer.work_loads);
+
+        pool.spawn_threads(num_threads);
+
+        pool.render_and_wait();
+    }
+
+    void set_coords()
+    {
+        timeout(-1);
+        echo();
+
+        set_status("Set real coordinate.");
+        bool success = false;
+
+        char* c_real = new char[160];
+        mpreal real;
+        while(success == false)
+        {
+            move(display.buffer_height+2,13);
+            clrtoeol();
+            getstr(c_real);
+
+            try
+            {
+                real = c_real;
+                success = true;
+            }
+            catch(...)
+            {
+                success = false;
+                set_status("Bad real coordinate try again.");
+            }
+        }
+
+        char* c_imag = new char[160];
+        mpreal imag;
+        success = false;
+        while(success == false)
+        {
+            set_status("Set imaginary coordinate.");
+            move(display.buffer_height+3,13);
+            clrtoeol();
+            getstr(c_imag);
+
+            try
+            {
+                imag = c_imag;
+                success = true;
+            }
+            catch(...)
+            {
+                success = false;
+                set_status("Bad imaginary coordinate try again.");
+            }
+        }
+
+        mandelbrot_viewport.set_coords(real, imag);
+        
+        keypad(stdscr, TRUE);
+        clear();
+        noecho();
+        std::ios_base::sync_with_stdio(false);
+        nodelay(stdscr, TRUE);
+        clear_status();
+    }
+
+    void set_iterations()
+    {
+        timeout(-1);
+        echo();
+        char* input = new char[160];
+
+        bool success = false;
+
+        set_status("Set iterations.");
+        while( success == false )
+        {
+            move(display.buffer_height+8,12);
+            clrtoeol();
+            getstr(input);
+            try
+            {
+                mandelbrot_viewport.setMaxIterations(std::stoi(input));
+                success = true;
+            }
+            catch(...)
+            {
+                success = false;
+                set_status("Bad number try again.");
+            }
+        }
+        
+        keypad(stdscr, TRUE);
+        clear();
+        noecho();
+        std::ios_base::sync_with_stdio(false);
+        nodelay(stdscr, TRUE);
+        
+        clear_status();
+    }
+};
 
 int main(int argc, char *argv[])
 {
-	int c;
+    addstr("starting...");
+    mpreal::set_default_prec(mpfr::digits2bits(20));
 
-	//Ncurses init
-	initscr();
-	keypad(stdscr, TRUE);
-	clear();
-	noecho();
-
-	std::ios_base::sync_with_stdio(false);
-	mpreal::set_default_prec(mpfr::digits2bits(precision));
-	std::cout << std::setprecision(precision);
-  	nodelay(stdscr, TRUE);
-
-	//Initialize global variables
-	set_screen_size();
-	pause_thread_flag = true;
-	input_timeout_ms = -1;
-	transl_set_for_zlevel = false;
-	mpf_height_scale = 0;
-	mpf_width_scale = 0;
-	mpf_transl_x = 0;
-	mpf_transl_y = 0;
-	iter_factor = 0;
-	char_count = 17;
-	sleep_time = 0;
-	maxIterations = 25;
-	mpf_real_coordinate = "0";
-	mpf_imag_coordinate = "0";
-	mpf_zoom_factor = "0.9";
-	mpf_real_min = "-3";
-	mpf_real_max = "3";
-	mpf_imag_min = "-2";
-	mpf_imag_max = "2";
-
-	mpf_width = get_width();
-	mpf_height = get_height();
-    
-    timeout(input_timeout_ms);
-
-	set_half_zoom_factor();
-	set_zoom_out_factor();
-	set_screen_chunks();
-	spawn_threads();
-
-	set_translation_distance();
-
-	sleep(1.0);
-
-	while(1)
-	{
-		display();
-
-		c = getch();
-
-		switch(c)
-		{			
-			case 10:	//10 is enter on normal keyboard
-				zoom();
-				set_translation_distance();
-				spawn_threads();
-				break;
-			case KEY_BACKSPACE:
-				zoom_out();
-				set_translation_distance();
-				spawn_threads();
-				break;
-			case KEY_UP:
-				move_up();
-				spawn_threads();
-				break;
-			case KEY_DOWN:
-				move_down();
-				spawn_threads();
-				break;
-			case KEY_LEFT:
-				move_left();
-				spawn_threads();
-				break;
-			case KEY_RIGHT:
-				move_right();
-				spawn_threads();
-				break;
-			case 88: 	// uppercase X
-			case 120: 	// lowercase X
-				set_coords();
-				spawn_threads();
-				break;
-			case 73:	//uppercase I
-			case 105:	//lowercase i
-				set_iterations();
-				spawn_threads();
-				break;
-			case 113: //letter q, for quit
-			case 27:  //escape key
-				endwin();
-				return 1;
-				break;
-			default:
-			 	check_screen_size();
-				mvprintw(buffer_height, 0,"Character pressed is = %3d Hopefully it can be printed as '%c'", c, c);
-				// refresh();
-				// getch();
-				break;		
-		}
-
-		frame_counter++;
-	}
-	endwin();
-	return 1;
+    UserInterface UI;
+	UI.Navigate();
 }
