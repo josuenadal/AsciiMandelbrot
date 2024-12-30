@@ -76,6 +76,7 @@ class Mandelbrot_Viewport
     // Zoom Factor - The area gets multiplied by this in order to shrink
     mpreal mpf_zoom_factor;
     mpreal mpf_half_zoom;
+    mpreal mpf_zoom_out_factor;
 
     // The length of traversal in X or Y - controlled by transl_factor
     mpreal mpf_transl_x;
@@ -110,6 +111,7 @@ class Mandelbrot_Viewport
 
         // Set zoom factors
         mpf_half_zoom = mpf_zoom_factor * 0.5;
+        mpf_zoom_out_factor = (1 + (1 - mpf_zoom_factor)) * 0.5;
 
     }
 
@@ -199,11 +201,11 @@ class Mandelbrot_Viewport
     {
         mpreal half_width, half_height;
 
-        half_width = (mpf_width + mpf_width * (1 - mpf_zoom_factor)) * 0.5;
+        half_width = mpf_width * mpf_zoom_out_factor;
         mpf_real_min =  mpf_real_coordinate - half_width;
         mpf_real_max = mpf_real_coordinate + half_width;
 
-        half_height = (mpf_height + mpf_height * (1 - mpf_zoom_factor)) * 0.5;
+        half_height = mpf_height * mpf_zoom_out_factor;
         mpf_imag_min = mpf_imag_coordinate - half_height;
         mpf_imag_max = mpf_imag_coordinate + half_height;
 
@@ -425,6 +427,7 @@ class Renderer
     Renderer(Mandelbrot_Viewport& _m_v_ptr, Display& _display_ptr) : mandelbrot_viewport_ptr(_m_v_ptr), display_ptr(_display_ptr) 
     {
         calc_scale();
+        generate_thread_work();
     }
 
     // Get character from shader array.
@@ -468,25 +471,11 @@ class Renderer
         return mandelbrot_viewport_ptr.mpf_imag_min + buffer_y * mpf_height_scale;
     }
 
-    // shrink the scale when zooming in.
-    void shrink_scale()
-    {
-        mpf_width_scale *= mandelbrot_viewport_ptr.mpf_zoom_factor;
-        mpf_height_scale *= mandelbrot_viewport_ptr.mpf_zoom_factor;
-    }
-
-    void expand_scale()
-    {
-        mpf_width_scale /= mandelbrot_viewport_ptr.mpf_zoom_factor;
-        mpf_height_scale /= mandelbrot_viewport_ptr.mpf_zoom_factor;
-    }
-
     // Adjusts the buffer pixel to point conversion for the current window to plane size.
     void calc_scale()
     {
         mpf_width_scale = mandelbrot_viewport_ptr.mpf_width / display_ptr.buffer_width;
         mpf_height_scale = mandelbrot_viewport_ptr.mpf_height / display_ptr.buffer_height;
-        generate_thread_work();
     }
 
     void generate_thread_work()
@@ -613,7 +602,7 @@ class ThreadPool
     {
         const std::chrono::time_point<std::chrono::system_clock> now = std::chrono::system_clock::now();
         const std::chrono::duration duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - frame_start_time);
-        if(duration.count() > 100)
+        if(duration.count() > 1)
         {
             frame_start_time = now;
             return true;
@@ -775,12 +764,15 @@ class ThreadPool
 
         // If mutex is occupied, the thread is still being generated.
         frame_wait_condition.wait(lock);
+
+        lock.unlock();
     }
 
     void render_and_wait()
     {
         render_frame();
         wait_for_frame();
+        wait_for_draw();
     }
 
     int get_job_num()
@@ -867,13 +859,13 @@ class UserInterface
                 case 10:	//10 is enter on normal keyboard
                     set_status("Zooming in...");
                     mandelbrot_viewport.zoom();
-                    renderer.shrink_scale();
+                    renderer.calc_scale();
                     pool.render_and_wait();
                     break;
                 case KEY_BACKSPACE:
                     set_status("Zooming out...");
                     mandelbrot_viewport.zoom_out();
-                    renderer.expand_scale();
+                    renderer.calc_scale();
                     pool.render_and_wait();
                     break;
                 case KEY_UP:
@@ -962,11 +954,12 @@ class UserInterface
 
     void resize_window()
     {
-        pool.Stop();
+        // pool.Stop();
 
         // Resize screen
         display.adjust_screen_size();
         renderer.calc_scale();
+        renderer.generate_thread_work();
 
         // Add recalculated workload to the thread pool.
         pool.add_queue(renderer.work_loads);

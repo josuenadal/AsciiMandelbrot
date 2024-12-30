@@ -1,9 +1,8 @@
 analysis.txt
-AsciiMandel
 gmon.out
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/settings.json
 .vscode/tasks.json
 mpreal.h
-final_ascii_mandelbrot
+asciimandelbrot
