@@ -6,3 +6,4 @@ gmon.out
 .vscode/tasks.json
 mpreal.h
 asciimandelbrot
+compilenrun.sh

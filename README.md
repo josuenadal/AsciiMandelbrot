@@ -9,6 +9,7 @@ A Multithreaded Mandelbrot Explorer for your terminal. Written in C++ for Ncurse
 | i         | Set iterations.  |
 |Arrow Keys | Move camera.     |
 | q or ESC  | Quit application.|
+| c         | Shade cycle.     |
 
 To compile use:
 g++ asciimandelbrot.cpp -o ./AsciiMandelbrot -lgmp -lgmpxx -lmpfr -lncurses --fast-math
@@ -21,7 +22,5 @@ Still a work in progress.
 
 To do: 
 - Thinking of doing some sort of makefile/compilation process.
-- Parametrise many of the variables so user can configure performance behaviors.
 - Want to add horizon mirroring/reflection so only the top half needs to be calculated and the bottom half is mirrored when screen crosses the horizon.
-- Fix seemingly random overflow in calculate_buffer_area_threaded. (Might be related to next point)
-- Function get_screen_chunks needs more proofing, sort out edge cases. 
+- Further harden thread functionality. 

@@ -17,15 +17,19 @@
 
 using mpfr::mpreal;
 
-const uint32_t num_threads = std::thread::hardware_concurrency() * 2 - 2;
-// const uint32_t num_threads = 1;
+// Will use all available threads, reserving 2, one for drawing and one for input.
+const uint32_t num_threads = std::thread::hardware_concurrency() - 2;
 
+//
+// Mandelbrot object containing the function that calculates each point.
+//
 class Mandelbrot
 {
     public:
-    // Number of iterations
+    // Max Iterations to calculate orbit for. Related to visible depth.
     long int maxIterations = 50;
 
+    // Mandelbrot orbit calculator. Checks when it converges or shoots off, cap is maxIterations. 
     int calculate_point(mpreal realc, mpreal imaginaryc)
     {
         int iter_count = 0;
@@ -53,6 +57,7 @@ class Mandelbrot
 
 };
 
+// Defines the camera view and its movements.
 class Mandelbrot_Viewport
 {
     public:
@@ -68,7 +73,6 @@ class Mandelbrot_Viewport
     mpreal mpf_width;
     mpreal mpf_height;
 
-
     // Desired Focus point
     mpreal mpf_real_coordinate;
     mpreal mpf_imag_coordinate;
@@ -78,13 +82,13 @@ class Mandelbrot_Viewport
     mpreal mpf_half_zoom;
     mpreal mpf_zoom_out_factor;
 
-    // The length of traversal in X or Y - controlled by transl_factor
-    mpreal mpf_transl_x;
-    mpreal mpf_transl_y;
-
     // The factor which when multiplied by each dimension gives 
     // the distance to move the plane in x or y. 
     mpreal mpf_transl_factor;
+
+    // The length of traversal in X or Y - controlled by transl_factor
+    mpreal mpf_transl_x;
+    mpreal mpf_transl_y;
 
     Mandelbrot_Viewport()
     {
@@ -92,7 +96,12 @@ class Mandelbrot_Viewport
         mpf_real_coordinate = "0";
         mpf_imag_coordinate = "0";
 
+        // Set factor of the screen area to zoom by.
+        // Screen will be zoomed out by the inverse of this factor (1 - mpf_zoom_factor).
         mpf_zoom_factor = "0.9";
+
+        // Set translation factor, will move screen horz and vert by this factor.
+        mpf_transl_factor = 0.075;
 
         // Set visible area.
         mpf_real_min = "-3";
@@ -100,16 +109,14 @@ class Mandelbrot_Viewport
         mpf_imag_min = "-2";
         mpf_imag_max = "2";
 
-        // Set the dimensions of the area.
+        // Calculate the dimensions of the area.
         mpf_height = mpf_imag_max - mpf_imag_min;
 	    mpf_width = mpf_real_max - mpf_real_min;
 
-        mpf_transl_factor = 0.1;
-
-        // Set plane movement distances
+        // Calculate plane movement distances.
         set_translation_distance();
 
-        // Set zoom factors
+        // Calculate zoom factors.
         mpf_half_zoom = mpf_zoom_factor * 0.5;
         mpf_zoom_out_factor = (1 + (1 - mpf_zoom_factor)) * 0.5;
 
@@ -125,12 +132,14 @@ class Mandelbrot_Viewport
         mandelbrot.maxIterations = iterations;
     }
 
+    // Calculate translation distance at each level.
     void set_translation_distance()
     {
         mpf_transl_x = mpf_width * mpf_transl_factor;
         mpf_transl_y = mpf_height * mpf_transl_factor;
     }
 
+    // Call the mandelbrot point function.
     int calculate_point(mpreal realc, mpreal imaginaryc)
     {
         int iter = mandelbrot.calculate_point(realc, imaginaryc);
@@ -138,28 +147,27 @@ class Mandelbrot_Viewport
         return iter;
     }
 
+    // Move viewport up around the point. 
     void move_up()
     {
-        // int vert_chunk = std::floor(buffer_height / screen_chunks);
-        //memset(reinterpret_cast<void*>(buffer), ' ', vert_chunk * buffer_width);
-        // memmove(buffer + vert_chunk * buffer_width, buffer, buffer_size);
         mpf_imag_min -= mpf_transl_y;
         mpf_imag_max += mpf_transl_y;
         mpf_imag_coordinate -= mpf_transl_y;
-        // reset_specific_chunks(1, screen_chunks, 1, 1);
     }
-
+    
+    // Move viewport down around the point. 
     void move_down()
     {
         // int vert_chunk = std::floor(buffer_height / screen_chunks);
         //memset(reinterpret_cast<void*>(buffer), ' ', vert_chunk * buffer_width);
-        // memmove(buffer, buffer + vert_chunk * buffer_width, buffer_size - vert_chunk * buffer_width);
+        // memmove(buffer, buffer + vert_chunk * buffer_width, buffer_length - vert_chunk * buffer_width);
         mpf_imag_min += mpf_transl_y;
         mpf_imag_max -= mpf_transl_y;
         mpf_imag_coordinate += mpf_transl_y;
         // reset_specific_chunks(1, screen_chunks, screen_chunks, screen_chunks);
     }
 
+    // Move left up around the point. 
     void move_left()
     {
         mpf_real_min -= mpf_transl_x;
@@ -167,6 +175,7 @@ class Mandelbrot_Viewport
         mpf_real_coordinate -= mpf_transl_x;
     }
 
+    // Move viewport right around the point. 
     void move_right()
     {
         mpf_real_min += mpf_transl_x;
@@ -174,15 +183,18 @@ class Mandelbrot_Viewport
         mpf_real_coordinate += mpf_transl_x;
     }
 
+    // Zoom into the mandelbrot by reducing the height of the viewport around the center point.
     void zoom()
     {
-        // Zooming is done by reducing the area calculated by zoom factor, then adding each 
-        // half of the new area to each side of the coordenate. Thus always zooming around the chosen coordinate.
+        // Zooming is done by reducing the area calculated by zoom_factor, then adding each 
+        // half of the new area to each side of the coordenate that is centered. Thus always zooming around the chosen coordinate.
         mpreal half_width, half_height;
 
-        // I use half of the factor to immediately get the half width with only one multiplication.
-        // That way i do not have to multiply by the zoom factor then divide by 2. In order to-
-        // add each half to each side of the coordinate.
+        /*  
+            I use half of the factor to immediately get the half width with only one multiplication.
+            That way i do not have to multiply by the zoom factor then divide by 2. In order to-
+            add each half to each side of the coordinate, thereby ensuring the movements are always centered.
+        */
         half_width = mpf_width * mpf_half_zoom;
         mpf_real_min =  mpf_real_coordinate - half_width;
         mpf_real_max = mpf_real_coordinate + half_width;
@@ -197,6 +209,7 @@ class Mandelbrot_Viewport
         set_translation_distance();
     }
 
+    // Zoom out of the mandelbrot by reducing the hight of the viewport around the center point.
     void zoom_out()
     {
         mpreal half_width, half_height;
@@ -215,8 +228,12 @@ class Mandelbrot_Viewport
         set_translation_distance();
     }
 
-    void center_around_set_coords()
+    // Center viewport around specified coords.
+    void set_coords(mpreal real, mpreal imag)
     {
+        mpf_real_coordinate = real;	
+        mpf_imag_coordinate = imag;
+        
         mpreal half_width, half_height;
 
         half_width = mpf_width * 0.5;
@@ -227,25 +244,7 @@ class Mandelbrot_Viewport
         mpf_imag_min = mpf_imag_coordinate - half_height;
         mpf_imag_max = mpf_imag_coordinate + half_height;
 
-        // set_translation_distance();
-    }
-
-    void set_coords(mpreal real, mpreal imag)
-    {
-        mpf_real_coordinate = real;	
-        mpf_imag_coordinate = imag;
-        center_around_set_coords();
-    }
-
-    // Output some useful information about the map and program data.
-    void output_status_bar()
-    {
-        // printw("depth = %s\n", (mpf_real_max - mpf_real_min).toString().c_str() );
-        // printw("real coord = %s\nimag coord = %s\n", mpf_real_coordinate.toString().c_str(), mpf_imag_coordinate.toString().c_str());
-        // printw("real_min = %s \nreal_max = %s\n", mpf_real_min.toString().c_str(), mpf_real_max.toString().c_str());
-        // printw("imag_min = %s \nimag_max = %s \n", mpf_imag_min.toString().c_str(), mpf_imag_max.toString().c_str());
-        // printw("Iterations: %ld\n", getMaxIterations());
-        // printw("buffer_width: %d buffer_height = %d", buffer_width, buffer_height);
+        set_translation_distance();
     }
     
     // Output some useful information about the viewport.
@@ -265,67 +264,81 @@ class Mandelbrot_Viewport
     
     private:
 
+    // The mandelbrot obj.
     Mandelbrot mandelbrot;
 };
 
+//
+// Display class that handles all drawing to the screen.
+//
 class Display
 {
     public:
 
+    // Mutex for utilizing screen sizes. Prevents overflow when resizing.
     std::mutex sizes_mutex;
 
+    // Editable buffer.
     std::vector<char> buffer;
 
+    // Display buffer.
+    std::vector<char> display_buffer;
+
+    // Buffer dimmensions.    
     long int buffer_width;
     long int buffer_height;
+    long int buffer_length;
 
-    long int buffer_size;
-
-    bool frame_ready = true;
-
+    // Variable for screen info details.
     std::string stats = "";
 
-    int coord(int x, int y)
+    // Function for converting a coordenate to a buffer position.
+    int coord_to_buffer_pos(int x, int y)
     {
         return x+(buffer_width*y);
     }
 
-    // Draw the frame on the terminal.
-    // void draw_nobuff()
-    // {
-    //     move(0,0);
-    //     for (int pos = 0; pos < buffer_size-1; pos += buffer_width)
-    //     {
-    //         write(1, buffer.data() + pos, buffer_width);
-    //         write(1, "\n", sizeof(char));
-    //         write(1, "\r", sizeof(char));
-    //     }
-    // }
-
-    void draw()
+    // Draw whole display buffer at position 1, 1 of terminal.
+    void draw_display_buffer()
     {
+        // This program uses ncurses and multithreading. 
+        // Those 2 don't mix. That's why i use printf to print here.
+        // It is imperative to only use printf because ncurses functions
+        // are being reserved for the user interace.
         std::unique_lock lock(sizes_mutex);
         printf("\033[%d;%dH", 1, 1);
         for (int h = 0; h < buffer_height; h++)
         {
             for(int w = 0; w < buffer_width; w++)
             {
-                printf("%c",buffer[(h*buffer_width)+w]);
+                printf("%c",display_buffer[(h*buffer_width)+w]);
             }
             printf("%c",'\r');
             printf("%c",'\n');
         }
-        // printf("\x1B[1A");
     }
 
+    // Set the stats.
+    void set_stats(std::string s)
+    {
+        stats = s;
+    }
+
+    // Print stats to bottom of mandelbrot display area.
     void print_stats()
     {
+        // This program uses ncurses and multithreading. 
+        // Those 2 don't mix. That's why i use printf to print here.
+        // It is imperative to only use printf because ncurses functions
+        // are being reserved for the user interace.
+        clear_stats();
         printf("\033[%ld;%dH", buffer_height+1, 1);
-        // printf("\x1B[0J");
+        printf("\x1B[0J");
         printf("%s",stats.c_str());
         printf("\033[%d;%dH", 1, 1);
     }
 
+    // Clear from the bottom of the mandelbrot display area to the end of the screen.
     void clear_stats()
     {
         printf("\033[%ld;%dH", buffer_height+1, 1);
@@ -334,49 +347,31 @@ class Display
 
     Display()
     {
-        // Ncurses init
-        initscr();			/* Start curses mode 		*/
-        raw();				/* Line buffering disabled	*/
-        keypad(stdscr, TRUE);		/* We get F1, F2 etc..		*/
-        noecho();			/* Don't echo() while we do getch */
+        // Ncurses init.
+        initscr();              // Start curses mode.
+        raw();                  // Line buffering disabled
+        keypad(stdscr, TRUE);   // We get F1, F2 etc..
+        noecho();               // Don't echo() while we do getch.
 
+        // Here to init screen dimensions and set buffer dimmensions.
         adjust_screen_size();
 
+        // Fill buffers with whatever.
         std::fill(buffer.begin(), buffer.end(), '|');
+        std::fill(display_buffer.begin(), display_buffer.end(), '|');
     }
 
-    void display_img()
+    // Main draw function. Presents main content.
+    void draw_screen()
     {
         print_stats();
-        draw();
+        draw_display_buffer();
     }
 
-    void display_threaded()
-    {
-        while(true)
-        {
-            if(frame_ready == true)
-            {
-                clear();
-                draw();
-                print_stats();
-            }
-        }
-    }
-
-    // void generate_draw_thread()
-    // {
-    //     std::thread T1(&Display::display_threaded, this);
-    //     T1.detach();
-    // }
-
-    void set_stats(std::string s)
-    {
-        stats = s;
-    }
-
+    // Readjust screensize if necessary.
     void adjust_screen_size()
     {
+        // Lock sizes_mutex so it doesnt interfere with draw.
         std::unique_lock lock(sizes_mutex);
         long int window_width = 0;
         long int window_height = 0;
@@ -387,46 +382,60 @@ class Display
             //Set buffer dimensions.
             buffer_height = window_height - 9;
             buffer_width = window_width - 1;
-            buffer_size = buffer_height * buffer_width;
-            buffer.resize(buffer_size);
+            buffer_length = buffer_height * buffer_width;
+
+            buffer.resize(buffer_length);
             std::fill(buffer.begin(), buffer.end(), '|');
+
+            display_buffer.resize(buffer_length);
+            std::fill(display_buffer.begin(), display_buffer.end(), '|');
         }
+        lock.unlock();
+    }
+
+    // Put the finished rendered buffer into the display buffer for presentation.
+    void swap_buffer()
+    {
+        display_buffer.swap(buffer);
     }
 };
 
+// 
+// Handles all rendering.
+//
 class Renderer
 {
     public:
-    // Shading array
+
+    // Shading array, this is what the mandelbrot looks like.
     const char* shade_chars = " .,-~o:;*=><!?HX#$@🮙";
-    // const char* shade_chars = " ░▒▓█";
-    
-    bool shade_toggle = false;
     unsigned long int shade_char_size = 0;
-
-
-    // Work load for the threads in <start_line, end_line> tuple.
-    std::queue<std::tuple<int, int>> work_loads;
     
+    // Cycles shades for pulsating appearance.
+    bool shade_cycle_toggle = false;
+
+    // Contains every threads work as a tuple of beggining and end positions of the buffer.
+    std::queue<std::tuple<int, int>> work_queue;
+    
+    // Scales for conversions between a continous point and a discrete buffer index.
     mpreal mpf_width_scale;
     mpreal mpf_height_scale;
 
-    // Screen Buffer Size in Character width/height
+    // Screen buffer sizes.
     static long int buffer_width;
     static long int buffer_height;
-    long int buffer_size = 0;
+    long int buffer_length = 0;
 
-    long int window_width = 0;
-    long int window_height = 0;
-
-    bool ghosting = false;
-
+    // Objects required for rendering.
     Mandelbrot_Viewport& mandelbrot_viewport_ptr;
     Display& display_ptr;
 
     Renderer(Mandelbrot_Viewport& _m_v_ptr, Display& _display_ptr) : mandelbrot_viewport_ptr(_m_v_ptr), display_ptr(_display_ptr) 
     {
+        // Init window sizes and buffer sizes.
         calc_scale();
+
+        // Generate work for threads.
         generate_thread_work();
     }
 
@@ -440,18 +449,19 @@ class Renderer
         return shade_chars[(iter % sizeof(shade_chars))+shade_char_size];
     }
 
-    // Calculate the points in the mandelbrot_viewport_ptr. 
-    void calculate_whole_frame()
-    {
-        for (int y = 0; y < display_ptr.buffer_height; y++)
-        {
-            for (int x = 0; x <= display_ptr.buffer_width; x++)
-            {
-                display_ptr.buffer[display_ptr.coord(x,y)] = get_shade( mandelbrot_viewport_ptr.calculate_point( map_horz_buffer_to_plane(x), map_vert_buffer_to_plane(y)));
-            }
-        }
-    }
+    // Calculate the whole screen.
+    // void calculate_whole_frame()
+    // {
+    //     for (int y = 0; y < display_ptr.buffer_height; y++)
+    //     {
+    //         for (int x = 0; x <= display_ptr.buffer_width; x++)
+    //         {
+    //             display_ptr.buffer[display_ptr.coord_to_buffer_pos(x,y)] = get_shade( mandelbrot_viewport_ptr.calculate_point( map_horz_buffer_to_plane(x), map_vert_buffer_to_plane(y)));
+    //         }
+    //     }
+    // }
 
+    // From buffer index calculate the corresponding point on the mandelbrot.
     void calculate_from_buff_pos(int buff_pos)
     {
         int x = buff_pos % display_ptr.buffer_width;
@@ -478,36 +488,36 @@ class Renderer
         mpf_height_scale = mandelbrot_viewport_ptr.mpf_height / display_ptr.buffer_height;
     }
 
+    // Divides the buffer into equal pieces, one for each thread.
     void generate_thread_work()
     {
-        display_ptr.frame_ready = false;
 
-        work_loads = std::queue<std::tuple<int, int>>();
-        // printw("width, height: %ld, %ld\n", display_ptr.buffer_width, display_ptr.buffer_height);
-        // If there are more threads than lines make each thread process one line.
-        if( num_threads >= display_ptr.buffer_size )
+        // Reset work queue.
+        work_queue = std::queue<std::tuple<int, int>>();
+        
+        // If there are more threads than indexes make each thread process one line and return.
+        if( num_threads >= display_ptr.buffer_length )
         {
-            for(int i = 0; i < display_ptr.buffer_size; i++)
+            for(int i = 0; i < display_ptr.buffer_length; i++)
             {
-                work_loads.emplace(std::make_tuple(i,1));
+                work_queue.emplace(std::make_tuple(i,1));
             }
             return;
         }
 
         // Calculate amount of lines per each thread.
-        int floored = floor(display_ptr.buffer_size / num_threads);
+        int floored = floor(display_ptr.buffer_length / num_threads);
         long int end = 0;
 
         // Make the work loads, which consist of a tuple of beggining and ending indexes to calculate.
-        for(int i = 0; i < display_ptr.buffer_size; i += floored)
+        for(int i = 0; i < display_ptr.buffer_length; i += floored)
         {
             end = i + floored;
-            work_loads.emplace(std::make_tuple(i,  end));
-            // printw("Workload %d, %ld\n", i, end);
+            work_queue.emplace(std::make_tuple(i,  end));
         }
 
         // Check if there is a remainder due to rounding and add it to the last work load.
-        int remainder = display_ptr.buffer_size % floored;  
+        int remainder = display_ptr.buffer_length % floored;  
 
         if(remainder == 0)
         {
@@ -515,21 +525,127 @@ class Renderer
         }
 
         // Add remainder to last work load
-        int first_offset = std::get<0>(work_loads.back());
-        int last_offset = display_ptr.buffer_size;
+        int first_offset = std::get<0>(work_queue.back());
+        int last_offset = display_ptr.buffer_length;
 
-        // printw("Workload %d, %d\n", first_offset, last_offset);
-        work_loads.back() = std::make_tuple(first_offset, last_offset);
-        // refresh();
+        work_queue.back() = std::make_tuple(first_offset, last_offset);
     }
 };
 
+//
+//  Handles the rendering and drawing thread.
+//
 class ThreadPool
 {
+    public:
+
+    // Create all rendering threads and the draw thread.
+    void spawn_threads(uint32_t num_threads)
+    {
+        terminate_draw = false;
+        terminate = false;
+        for (uint32_t i = 0; i < num_threads; i++)
+        {
+            thread_vector.emplace_back(std::thread(&ThreadPool::ThreadLoop,this));
+        }
+        DT = std::thread(&ThreadPool::draw_loop, this);
+    }
+    
+    // Set the work queue.
+    void add_queue(std::queue<std::tuple<int, int>> _work_load)
+    {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        done_threads = 0;
+
+        jobs = _work_load;
+        // prev_job is kept to to use the same work_load without having to generate it again.
+        prev_job = _work_load;
+
+        // When threads are waiting this notifies that the workload is ready.
+        queue_condition.notify_all();
+        pause_draw_condition.notify_all();
+    }
+
+    // Calculate frame using the mandelbrot_viewports current configuration.
+    void render_frame()
+    {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        done_threads = 0;
+
+        // Reset job queue to the previous
+        jobs = prev_job;
+        
+        lock.unlock();
+
+        // When threads are waiting this notifies that the workload is ready.
+        queue_condition.notify_all();
+    }
+
+    // Hold draw_mutex until frame_wait_condition is notified.
+    void wait_for_frame()
+    {
+        std::unique_lock<std::mutex> lock(draw_mutex);
+        frame_wait_condition.wait(lock);
+        lock.unlock();
+    }
+
+    // Will render and hold draw until frame is done.
+    void render_and_wait()
+    {
+        render_frame();
+        wait_for_frame();
+    }
+
+    int get_job_num()
+    {
+        return jobs.size();
+    }
+
+    void clear_jobs()
+    {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        jobs = {};
+        lock.unlock();
+        queue_condition.notify_one();
+    }
+
+    void Stop()
+    {
+        terminate = true;
+        terminate_draw = true;
+
+        for (std::thread& active_thread : thread_vector) 
+        {
+            queue_condition.notify_all();
+            active_thread.join();
+        }
+        thread_vector.clear();
+
+        pause_draw_condition.notify_all();
+        DT.join();
+    }
+    
+    bool busy()
+    {
+        bool poolbusy;
+
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        poolbusy = !jobs.empty();
+        
+        return poolbusy;
+    }
+
+    ThreadPool(uint32_t num_threads, Renderer& _renderer_ptr) : renderer_ptr(_renderer_ptr)
+    {
+        addstr("INIT");
+        add_queue(renderer_ptr.work_queue);
+        spawn_threads(num_threads);
+        render_and_wait();
+    }
+
     private:
 
     bool terminate = false;
-    bool frame_ready = false;
     bool pause_draw_thread = false;
     bool terminate_draw = false;
 
@@ -540,11 +656,12 @@ class ThreadPool
     std::mutex draw_mutex;
     std::condition_variable pause_draw_condition;
     std::condition_variable frame_wait_condition;
+    std::condition_variable queue_wait_condition;
     
     std::vector<std::thread> thread_vector;
 
     std::queue<std::tuple<int, int>> jobs = {};
-    std::queue<std::tuple<int, int>> const_jobs = {};
+    std::queue<std::tuple<int, int>> prev_job = {};
 
     std::chrono::time_point<std::chrono::system_clock> shade_start_time = std::chrono::system_clock::now();
     std::chrono::time_point<std::chrono::system_clock> frame_start_time = std::chrono::system_clock::now();
@@ -602,7 +719,7 @@ class ThreadPool
     {
         const std::chrono::time_point<std::chrono::system_clock> now = std::chrono::system_clock::now();
         const std::chrono::duration duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - frame_start_time);
-        if(duration.count() > 1)
+        if(duration.count() > 100)
         {
             frame_start_time = now;
             return true;
@@ -620,7 +737,6 @@ class ThreadPool
             }
             else
             {
-
                 renderer_ptr.shade_char_size++;
             }
         }
@@ -631,6 +747,7 @@ class ThreadPool
         while(true)
         {
             std::unique_lock lock(draw_mutex);
+
             pause_draw_condition.wait(lock, [this]{
                 return (pause_draw_thread == false) | terminate_draw ;
             });
@@ -640,35 +757,38 @@ class ThreadPool
                 return;
             }
 
-            if(renderer_ptr.shade_toggle)
+            if(renderer_ptr.shade_cycle_toggle)
             {
                 cycle_shade();
             }
             
             if(check_frame_time())
             {
-                if(frame_ready)
-                {
-                    renderer_ptr.display_ptr.display_img();
-                    frame_wait_condition.notify_all();
-                    frame_ready = false;
-                }
-                else
-                {
-                    renderer_ptr.display_ptr.clear_stats();
-                    renderer_ptr.display_ptr.print_stats();
-                }
+                renderer_ptr.display_ptr.draw_screen();
             }
+
+            lock.unlock();
+
+            frame_wait_condition.notify_one();
         }
     }
 
     void signal_done()
     {
         done_threads++;
-        if(done_threads == (num_threads-1))
+        if(done_threads == prev_job.size())
         {
-            frame_ready = true;
-            frame_wait_condition.notify_all();
+            std::unique_lock<std::mutex> q_lock(queue_mutex);
+            std::unique_lock d_lock(draw_mutex);
+
+            renderer_ptr.display_ptr.swap_buffer();
+
+            d_lock.unlock();
+            q_lock.unlock();
+            // std::fill(renderer_ptr.display_ptr.buffer.begin(), renderer_ptr.display_ptr.buffer.end(), 'X');
+
+            frame_wait_condition.notify_one();
+
         }
     }
 
@@ -684,142 +804,6 @@ class ThreadPool
         }
         signal_done();
     }
-
-    public:
-
-    void raise_pause_draw_flag()
-    {
-        pause_draw_thread = true;
-    }
-
-    void unpause_draw_thread()
-    {
-        pause_draw_thread = false;
-        pause_draw_condition.notify_all();
-    }
-
-    int get_num_done_threads()
-    {
-        return done_threads;
-    }
-
-    void spawn_threads(uint32_t num_threads)
-    {
-        terminate_draw = false;
-        terminate = false;
-        for (uint32_t i = 0; i < num_threads - 1; i++)
-        {
-            thread_vector.emplace_back(std::thread(&ThreadPool::ThreadLoop,this));
-        }
-        DT = std::thread(&ThreadPool::draw_loop, this);
-    }
-
-    void init_draw_thread()
-    {
-        DT.join();
-        terminate_draw = false;
-        erase();
-        DT = std::thread(&ThreadPool::draw_loop, this);
-    }
-
-    void kill_draw_thread()
-    {
-        std::unique_lock lock(draw_mutex);
-        addstr("killing draw thread now");
-        terminate_draw = true;
-    }
-    
-    void add_queue(std::queue<std::tuple<int, int>> _work_load)
-    {
-        std::unique_lock<std::mutex> lock(queue_mutex);
-        
-        frame_ready = false;
-        done_threads = 0;
-
-        jobs = _work_load;
-        const_jobs = _work_load;
-
-        // When threads are waiting this notifies that the workload is ready.
-        queue_condition.notify_all();
-        pause_draw_condition.notify_all();
-    }
-
-    void render_frame()
-    {
-        std::unique_lock<std::mutex> lock(queue_mutex);
-
-        frame_ready = false;
-        done_threads = 0;
-
-        // Reset job queue to the previous
-        jobs = const_jobs;
-        
-        // When threads are waiting this notifies that the workload is ready.
-        queue_condition.notify_all();
-    }
-
-    void wait_for_frame()
-    {
-        std::unique_lock<std::mutex> lock(draw_mutex);
-
-        // If mutex is occupied, the thread is still being generated.
-        frame_wait_condition.wait(lock);
-
-        lock.unlock();
-    }
-
-    void render_and_wait()
-    {
-        render_frame();
-        wait_for_frame();
-        wait_for_draw();
-    }
-
-    int get_job_num()
-    {
-        return jobs.size();
-    }
-
-    void clear_jobs()
-    {
-        std::unique_lock<std::mutex> lock(queue_mutex);
-        jobs = {};
-        queue_condition.notify_one();
-    }
-
-    void Stop()
-    {
-        terminate = true;
-        terminate_draw = true;
-
-        for (std::thread& active_thread : thread_vector) 
-        {
-            queue_condition.notify_all();
-            active_thread.join();
-        }
-        thread_vector.clear();
-
-        pause_draw_condition.notify_all();
-        DT.join();
-    }
-    
-    bool busy()
-    {
-        bool poolbusy;
-
-        std::unique_lock<std::mutex> lock(queue_mutex);
-        poolbusy = !jobs.empty();
-        
-        return poolbusy;
-    }
-
-    ThreadPool(uint32_t num_threads, Renderer& _renderer_ptr) : renderer_ptr(_renderer_ptr)
-    {
-        addstr("INIT");
-        add_queue(renderer_ptr.work_loads);
-        spawn_threads(num_threads);
-        render_and_wait();
-    }  
 };
 
 class UserInterface
@@ -838,6 +822,8 @@ class UserInterface
 
     ThreadPool pool{num_threads, renderer};
 
+    std::chrono::time_point<std::chrono::system_clock> ui_start_time = std::chrono::system_clock::now();
+
     int c;
 
     void Navigate()
@@ -846,14 +832,15 @@ class UserInterface
         keypad(stdscr, TRUE);
         clear();
         noecho();
-        std::ios_base::sync_with_stdio(false);
-        // nodelay(stdscr, TRUE);
+
+        renderer.calc_scale();
+        pool.render_and_wait();
         
         while(true)
         {
             clear_status();
+            flushinp();
             c = getch();
-
             switch(c)
             {			
                 case 10:	//10 is enter on normal keyboard
@@ -899,12 +886,18 @@ class UserInterface
                     break;
                 case 88: 	// uppercase X
                 case 120: 	// lowercase X
+                    pool.Stop();
                     set_coords();
+                    pool.add_queue(renderer.work_queue);
+                    pool.spawn_threads(num_threads);
                     pool.render_and_wait();
                     break;
                 case 73:	//uppercase I
                 case 105:	//lowercase i
+                    pool.Stop();
                     set_iterations();
+                    pool.add_queue(renderer.work_queue);
+                    pool.spawn_threads(num_threads);
                     pool.render_and_wait();
                     break;
                 case 113: //letter q, for quit
@@ -917,15 +910,27 @@ class UserInterface
         }
     }
 
+    bool check_ui_time()
+    {
+        const std::chrono::time_point<std::chrono::system_clock> now = std::chrono::system_clock::now();
+        const std::chrono::duration duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - ui_start_time);
+        if(duration.count() > 100)
+        {
+            ui_start_time = now;
+            return true;
+        }
+        return false;
+    }
+
     void toggle_shade_cycle()
     {
-        if(renderer.shade_toggle)
+        if(renderer.shade_cycle_toggle)
         {
-            renderer.shade_toggle = false;
+            renderer.shade_cycle_toggle = false;
         }
         else
         {
-            renderer.shade_toggle = true;
+            renderer.shade_cycle_toggle = true;
         }
     }
 
@@ -943,7 +948,7 @@ class UserInterface
     void draw()
     {
         pool.wait_for_frame();
-        display.display_img();
+        display.draw_screen();
     }
 
     void clear_status()
@@ -954,7 +959,7 @@ class UserInterface
 
     void resize_window()
     {
-        // pool.Stop();
+        pool.Stop();
 
         // Resize screen
         display.adjust_screen_size();
@@ -962,7 +967,7 @@ class UserInterface
         renderer.generate_thread_work();
 
         // Add recalculated workload to the thread pool.
-        pool.add_queue(renderer.work_loads);
+        pool.add_queue(renderer.work_queue);
 
         pool.spawn_threads(num_threads);
 
@@ -974,7 +979,8 @@ class UserInterface
         timeout(-1);
         echo();
 
-        set_status("Set real coordinate.");
+        mvprintw(display.buffer_height,0,"Set real coordinate.");
+        
         bool success = false;
 
         char* c_real = new char[160];
@@ -985,15 +991,20 @@ class UserInterface
             clrtoeol();
             getstr(c_real);
 
+            if(c_real[0] == '\0')
+            {
+                break;
+            }
+
             try
             {
                 real = c_real;
-                success = true;
+                break;
             }
             catch(...)
             {
                 success = false;
-                set_status("Bad real coordinate try again.");
+                mvprintw(display.buffer_height+1,0,"Bad real coordinate try again.");
             }
         }
 
@@ -1002,20 +1013,25 @@ class UserInterface
         success = false;
         while(success == false)
         {
-            set_status("Set imaginary coordinate.");
+            mvprintw(display.buffer_height,0,"Set imaginary coordinate.");
             move(display.buffer_height+3,13);
             clrtoeol();
             getstr(c_imag);
 
+            if(c_imag[0] == '\0')
+            {
+                break;
+            }
+
             try
             {
                 imag = c_imag;
-                success = true;
+                break;
             }
             catch(...)
             {
                 success = false;
-                set_status("Bad imaginary coordinate try again.");
+                mvprintw(display.buffer_height,0,"Bad imaginary coordinate try again.");
             }
         }
 
@@ -1023,9 +1039,7 @@ class UserInterface
         
         keypad(stdscr, TRUE);
         clear();
-        noecho();
-        std::ios_base::sync_with_stdio(false);
-        nodelay(stdscr, TRUE);
+        noecho();        
         clear_status();
     }
 
@@ -1037,30 +1051,34 @@ class UserInterface
 
         bool success = false;
 
-        set_status("Set iterations.");
+        mvprintw(display.buffer_height,0,"Set iterations.");
+
         while( success == false )
         {
-            move(display.buffer_height+8,12);
+            mvprintw(display.buffer_height+8,0,"Iterations = ");
             clrtoeol();
             getstr(input);
+
+            if(input[0] == '\0')
+            {
+                break;
+            }
+
             try
             {
                 mandelbrot_viewport.setMaxIterations(std::stoi(input));
-                success = true;
+                break;
             }
             catch(...)
             {
                 success = false;
-                set_status("Bad number try again.");
+                mvprintw(display.buffer_height,0,"Bad number try again.");
             }
         }
         
         keypad(stdscr, TRUE);
         clear();
-        noecho();
-        std::ios_base::sync_with_stdio(false);
-        nodelay(stdscr, TRUE);
-        
+        noecho();        
         clear_status();
     }
 };
@@ -1068,7 +1086,7 @@ class UserInterface
 int main(int argc, char *argv[])
 {
     addstr("starting...");
-    mpreal::set_default_prec(mpfr::digits2bits(20));
+    mpreal::set_default_prec(mpfr::digits2bits(50));
 
     UserInterface UI;
 	UI.Navigate();
